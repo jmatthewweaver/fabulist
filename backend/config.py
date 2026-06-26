@@ -1,0 +1,49 @@
+from pydantic_settings import BaseSettings
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent.parent
+
+
+class Settings(BaseSettings):
+    # Claude
+    anthropic_api_key: str
+    model_translation: str = "claude-haiku-4-5"
+    model_enrichment: str = "claude-sonnet-4-6"
+
+    # OpenAI (Whisper + TTS)
+    openai_api_key: str
+
+    # Image generation
+    replicate_api_token: str
+
+    # Auth
+    google_client_id: str
+    google_client_secret: str
+    jwt_secret: str
+    jwt_algorithm: str = "HS256"
+    jwt_expire_hours: int = 24 * 30  # 30 days
+
+    # Database
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost/fabulist"
+
+    # Paths
+    games_dir: Path = BASE_DIR / "games"
+    saves_dir: Path = BASE_DIR / "saves"
+    images_dir: Path = BASE_DIR / "images"
+
+    # Image generation mode:
+    #   conservative = first visit to each room only
+    #   normal       = enricher decides (dramatic moments, first visits, notable examines)
+    #   generous     = enricher decides + object close-ups + views
+    image_mode: str = "normal"
+    image_cooldown_turns: int = 3   # minimum turns between auto-generated images
+
+    # App
+    frontend_url: str = "http://localhost:3000"
+    debug: bool = False
+
+    class Config:
+        env_file = ".env"
+
+
+settings = Settings()

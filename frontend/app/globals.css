@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --parchment: 44 27% 88%;
+    --ink: 30 15% 15%;
+  }
+}
+
+/* Atmospheric placeholder for images before they load */
+.image-placeholder {
+  background: linear-gradient(135deg, #1a1410 0%, #0d0a08 50%, #1a1410 100%);
+  background-size: 200% 200%;
+  animation: shimmer 3s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+/* Book-style text rendering */
+.narrative-text {
+  font-size: clamp(1rem, 2.5vw, 1.125rem);
+  line-height: 1.8;
+  letter-spacing: 0.01em;
+}

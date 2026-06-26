@@ -1,0 +1,152 @@
+"""
+DfrotzAdapter: runs dfrotz as a subprocess, communicates via stdin/stdout.
+InfodumpExtractor: runs infodump (ztools) to extract Z-machine world data.
+
+Requires dfrotz and infodump to be on PATH (or configure paths in settings).
+"""
+import asyncio
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+from .adapter import GameEngineAdapter, WorldExtractor, StaticWorldData, StepResult
+
+# Patterns that indicate the game rejected the command
+_REJECTION_PATTERNS = re.compile(
+    r"(i don'?t (understand|know the word)|"
+    r"you can'?t|"
+    r"that'?s not a verb|"
+    r"i don'?t recognize that|"
+    r"huh\?|"
+    r"what\?)",
+    re.IGNORECASE,
+)
+
+# dfrotz outputs a prompt character; we read until we see it
+_PROMPT = b">"
+
+
+class DfrotzAdapter(GameEngineAdapter):
+    def __init__(self, dfrotz_path: str = "dfrotz"):
+        self._dfrotz_path = dfrotz_path
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def start(self, game_path: str, session_id: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            self._dfrotz_path, "-p", "-m", game_path,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        self._processes[session_id] = proc
+        self._locks[session_id] = asyncio.Lock()
+        # Consume the opening text
+        await self._read_until_prompt(proc)
+
+    async def step(self, session_id: str, command: str) -> StepResult:
+        proc = self._processes[session_id]
+        async with self._locks[session_id]:
+            proc.stdin.write(f"{command}\n".encode())
+            await proc.stdin.drain()
+            raw = await self._read_until_prompt(proc)
+        text = raw.strip()
+        rejected = bool(_REJECTION_PATTERNS.search(text))
+        return StepResult(raw_text=text, rejected=rejected)
+
+    async def save(self, session_id: str) -> bytes:
+        with tempfile.NamedTemporaryFile(suffix=".qzl", delete=False) as f:
+            save_path = f.name
+        result = await self.step(session_id, f"save\n{save_path}")
+        return Path(save_path).read_bytes()
+
+    async def restore(self, session_id: str, save_bytes: bytes) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".qzl", delete=False) as f:
+            f.write(save_bytes)
+            save_path = f.name
+        await self.step(session_id, f"restore\n{save_path}")
+
+    async def stop(self, session_id: str) -> None:
+        proc = self._processes.pop(session_id, None)
+        self._locks.pop(session_id, None)
+        if proc:
+            try:
+                proc.stdin.write(b"quit\ny\n")
+                await proc.stdin.drain()
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except Exception:
+                proc.kill()
+
+    async def _read_until_prompt(self, proc: asyncio.subprocess.Process) -> str:
+        buf = bytearray()
+        while True:
+            chunk = await asyncio.wait_for(proc.stdout.read(256), timeout=10.0)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            # dfrotz prompt is "> " at start of a line
+            if buf.rstrip().endswith(b">"):
+                break
+        text = buf.decode("latin-1", errors="replace")
+        # Strip the trailing prompt
+        return re.sub(r"\s*>\s*$", "", text)
+
+
+class InfodumpExtractor(WorldExtractor):
+    def __init__(self, infodump_path: str = "infodump"):
+        self._infodump_path = infodump_path
+
+    async def extract(self, game_path: str) -> StaticWorldData:
+        try:
+            result = subprocess.run(
+                [self._infodump_path, "-o", game_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            raw = result.stdout
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return StaticWorldData(raw_dump="")
+
+        return StaticWorldData(
+            rooms=_parse_rooms(raw),
+            objects=_parse_objects(raw),
+            vocab_verbs=_parse_verbs(raw),
+            vocab_nouns=_parse_nouns(raw),
+            raw_dump=raw,
+        )
+
+
+# --- infodump output parsers (rough; infodump format varies by Z-machine version) ---
+
+def _parse_rooms(dump: str) -> list[dict]:
+    # Objects with the "Room" attribute are rooms in Z-machine convention
+    rooms = []
+    for block in re.split(r"\n(?=Object\s+\d+)", dump):
+        if "Room" in block or "Outdoors" in block:
+            name_match = re.search(r'Short name: "([^"]+)"', block)
+            if name_match:
+                rooms.append({"name": name_match.group(1), "raw": block})
+    return rooms
+
+
+def _parse_objects(dump: str) -> list[dict]:
+    objects = []
+    for block in re.split(r"\n(?=Object\s+\d+)", dump):
+        name_match = re.search(r'Short name: "([^"]+)"', block)
+        if name_match:
+            objects.append({"name": name_match.group(1), "raw": block})
+    return objects
+
+
+def _parse_verbs(dump: str) -> list[str]:
+    section = re.search(r"Grammar:(.+?)(?:\n[A-Z]|\Z)", dump, re.DOTALL)
+    if not section:
+        return []
+    return list(set(re.findall(r'"(\w+)"', section.group(1))))
+
+
+def _parse_nouns(dump: str) -> list[str]:
+    section = re.search(r"Dictionary:(.+?)(?:\n[A-Z]|\Z)", dump, re.DOTALL)
+    if not section:
+        return []
+    return [w.strip() for w in re.findall(r'"(\w+)"', section.group(1))]
