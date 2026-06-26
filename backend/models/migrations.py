@@ -3,24 +3,45 @@ DDL that SQLAlchemy can't express natively — run once after create_all().
 Idempotent: uses IF NOT EXISTS where possible.
 """
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy import text
 
 _DDL = [
     # Extensions (idempotent)
     "CREATE EXTENSION IF NOT EXISTS vector",
-    "CREATE EXTENSION IF NOT EXISTS pg_search",
+    "CREATE EXTENSION IF NOT EXISTS pg_textsearch",
 
-    # BM25 index on inventions via ParadeDB pg_search.
-    # Indexes object_key (for exact/keyword lookup) and canonical_text (for content search).
-    # key_field must be the integer primary key.
+    # Make full_text a generated column: object_key (spaces restored) + canonical_text.
+    # ALTER COLUMN is idempotent-ish — wrapped in a DO block to skip if already generated.
     """
-    CREATE INDEX IF NOT EXISTS ix_inventions_bm25
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'inventions'
+            AND column_name = 'full_text'
+            AND is_generated = 'ALWAYS'
+        ) THEN
+            ALTER TABLE inventions
+                DROP COLUMN IF EXISTS full_text,
+                ADD COLUMN full_text TEXT
+                    GENERATED ALWAYS AS (
+                        replace(object_key, '_', ' ') || ' ' || canonical_text
+                    ) STORED;
+        END IF;
+    END
+    $$
+    """,
+
+    # BM25 index via pg_textsearch
+    """
+    CREATE INDEX IF NOT EXISTS inventions_bm25_idx
     ON inventions
-    USING bm25(id, object_key, canonical_text)
-    WITH (key_field='id')
+    USING bm25 (full_text)
+    WITH (text_config='english')
     """,
 ]
 
 
 async def run(conn: AsyncConnection) -> None:
     for stmt in _DDL:
-        await conn.execute(__import__("sqlalchemy").text(stmt))
+        await conn.execute(text(stmt))

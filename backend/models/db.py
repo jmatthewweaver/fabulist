@@ -97,6 +97,8 @@ class Invention(Base):
     session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
     object_key = Column(String, nullable=False)     # normalized lowercase, e.g. "wooden_cup"
     canonical_text = Column(Text, nullable=False)
+    # full_text is a generated column (set via DDL in migrations.py) used for BM25 indexing
+    full_text = Column(Text)
     embedding = Column(Vector(1024))                # pgvector: semantic similarity search
     source_turn = Column(Integer)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -105,9 +107,7 @@ class Invention(Base):
 
     __table_args__ = (
         UniqueConstraint("session_id", "object_key", name="uq_invention_session_object"),
-        # BM25 index via pg_search (ParadeDB) — created via raw DDL after table creation,
-        # since SQLAlchemy doesn't know the bm25 index type. See models/migrations.py.
-        # Vector index for semantic search:
+        # BM25 and HNSW indexes created via raw DDL in migrations.py
         Index("ix_inventions_embedding", "embedding", postgresql_using="hnsw",
               postgresql_with={"m": "16", "ef_construction": "64"},
               postgresql_ops={"embedding": "vector_cosine_ops"}),

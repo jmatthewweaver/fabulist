@@ -78,19 +78,19 @@ async def write(
     return True
 
 
-# --- BM25 search (pg_search / ParadeDB) ---
+# --- BM25 search (pg_textsearch) ---
 
 async def bm25_search(db: AsyncSession, session_id: str, query: str, limit: int = 8) -> list[dict]:
     """
-    Keyword relevance search via BM25. Good for: "find all inventions mentioning 'wooden' or 'tavern'".
-    Uses the ParadeDB @@@  operator against the bm25 index on (object_key, canonical_text).
+    Keyword relevance search via BM25.
+    Uses the pg_textsearch <@> operator against the inventions_bm25_idx index.
     """
     result = await db.execute(
         text(
-            "SELECT object_key, canonical_text, paradedb.score_bm25(id) AS score "
+            "SELECT object_key, canonical_text "
             "FROM inventions "
-            "WHERE session_id = :sid AND inventions @@@ :query "
-            "ORDER BY score DESC "
+            "WHERE session_id = :sid "
+            "ORDER BY full_text <@> to_bm25query(:query, 'inventions_bm25_idx') "
             "LIMIT :limit"
         ),
         {"sid": session_id, "query": query, "limit": limit},
