@@ -14,12 +14,13 @@ from ..models.db import Game, Save, Session, Style
 from ..game.dfrotz import DfrotzAdapter, InfodumpExtractor
 from ..ai.world_bible import generate_world_bible, build_vocab_index
 from ..config import settings
+from ..deps import get_db
 
 router = APIRouter(prefix="/api/games", tags=["games"])
 
 
 @router.get("")
-async def list_games(db: AsyncSession = Depends(lambda: None)):  # dep injected in main
+async def list_games(db: AsyncSession = Depends(get_db)):  # dep injected in main
     games = await db.execute(select(Game).order_by(Game.title))
     return [
         {
@@ -35,7 +36,7 @@ async def list_games(db: AsyncSession = Depends(lambda: None)):  # dep injected 
 
 
 @router.get("/{game_id}")
-async def get_game(game_id: str, user_id: str, db: AsyncSession = Depends(lambda: None)):
+async def get_game(game_id: str, user_id: str, db: AsyncSession = Depends(get_db)):
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "Game not found")
@@ -83,7 +84,7 @@ async def get_game(game_id: str, user_id: str, db: AsyncSession = Depends(lambda
 
 
 @router.post("/ingest")
-async def ingest_game(filename: str, db: AsyncSession = Depends(lambda: None)):
+async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     """
     Trigger one-time ingestion for a game file in the games/ directory.
     Idempotent: re-running updates metadata but doesn't regenerate the world bible.

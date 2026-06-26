@@ -1,16 +1,12 @@
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 from .config import settings
+from .deps import engine
 from .models.db import Base
-
-engine = create_async_engine(settings.database_url, echo=settings.debug)
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 @asynccontextmanager
@@ -35,27 +31,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve generated images as static files
 app.mount("/images", StaticFiles(directory=str(settings.images_dir)), name="images")
 
-
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        yield session
-
-
-# Dependency injection helper — patches into routers
-def _override_db_dep(app: FastAPI):
-    from .routers import games, sessions, websocket
-    for router_mod in (games, sessions):
-        for route in router_mod.router.routes:
-            if hasattr(route, "dependant"):
-                for dep in route.dependant.dependencies:
-                    if dep.call is lambda: None:
-                        dep.call = get_db
-
-
-# Register routers
 from .routers.auth import router as auth_router
 from .routers.games import router as games_router
 from .routers.sessions import router as sessions_router

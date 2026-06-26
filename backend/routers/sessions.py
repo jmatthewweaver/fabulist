@@ -14,6 +14,7 @@ from ..game.dfrotz import DfrotzAdapter
 from ..game.session_store import session_store, ActiveSession
 from ..ai.context_manager import ContextManager
 from ..config import settings
+from ..deps import get_db
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -23,7 +24,7 @@ async def create_session(
     game_id: str,
     style_id: str,
     user_id: str,
-    db: AsyncSession = Depends(lambda: None),
+    db: AsyncSession = Depends(get_db),
 ):
     game = await db.get(Game, game_id)
     if not game:
@@ -52,7 +53,7 @@ async def create_session(
 
 
 @router.get("/{session_id}")
-async def get_session(session_id: str, db: AsyncSession = Depends(lambda: None)):
+async def get_session(session_id: str, db: AsyncSession = Depends(get_db)):
     s = await db.get(DbSession, session_id)
     if not s:
         raise HTTPException(404)
@@ -67,7 +68,7 @@ async def get_session(session_id: str, db: AsyncSession = Depends(lambda: None))
 
 
 @router.post("/{session_id}/save")
-async def save_game(session_id: str, name: str | None, db: AsyncSession = Depends(lambda: None)):
+async def save_game(session_id: str, name: str | None, db: AsyncSession = Depends(get_db)):
     active = session_store.get(session_id)
     if not active:
         raise HTTPException(400, "Session not running")
@@ -96,7 +97,7 @@ async def save_game(session_id: str, name: str | None, db: AsyncSession = Depend
 
 
 @router.post("/{session_id}/restore/{save_id}")
-async def restore_save(session_id: str, save_id: str, db: AsyncSession = Depends(lambda: None)):
+async def restore_save(session_id: str, save_id: str, db: AsyncSession = Depends(get_db)):
     save = await db.get(Save, save_id)
     if not save or save.session_id != session_id:
         raise HTTPException(404)
@@ -126,7 +127,7 @@ async def restore_save(session_id: str, save_id: str, db: AsyncSession = Depends
 
 
 @router.delete("/{session_id}")
-async def end_session(session_id: str, db: AsyncSession = Depends(lambda: None)):
+async def end_session(session_id: str, db: AsyncSession = Depends(get_db)):
     await session_store.remove(session_id)
     db_session = await db.get(DbSession, session_id)
     if db_session:
