@@ -13,8 +13,10 @@ class Settings(BaseSettings):
     # OpenAI (Whisper + TTS)
     openai_api_key: str
 
-    # Image generation
-    replicate_api_token: str
+    # Image generation (BFL)
+    bfl_api_key: str
+    bfl_model_desktop: str = "flux-2-pro"       # reference image support, best quality
+    bfl_model_mobile: str = "flux-2-klein-4b"   # fast + cheap for low-res
 
     # Auth
     google_client_id: str

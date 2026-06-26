@@ -1,17 +1,23 @@
 """
-Scene image generation via FLUX 2 Dev on Replicate.
-Images are permanent; shared across sessions when game+location+objects+style match.
+Scene image generation via BFL (Black Forest Labs) API.
+Async polling pattern: POST to submit → GET polling_url until Ready.
+Images are permanent assets stored locally; shared across sessions when
+game + location + visible objects + style all match.
 """
+import asyncio
 import hashlib
-import json
 from pathlib import Path
 
-import replicate
+import httpx
 
 from ..config import settings
 
+_BFL_BASE = "https://api.bfl.ai/v1"
 _IMAGE_DIR = settings.images_dir
 _IMAGE_DIR.mkdir(exist_ok=True)
+
+_POLL_INTERVAL = 2.0   # seconds between polls
+_POLL_TIMEOUT = 120.0  # give up after 2 minutes
 
 
 def make_cache_key(game_id: str, location_id: str, visible_object_ids: list[str], style_id: str) -> str:
@@ -19,43 +25,76 @@ def make_cache_key(game_id: str, location_id: str, visible_object_ids: list[str]
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
+async def _submit(prompt: str, width: int, height: int, reference_urls: list[str], mobile: bool) -> str:
+    """Submit generation request, return polling_url."""
+    model = settings.bfl_model_mobile if mobile else settings.bfl_model_desktop
+    payload: dict = {
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+    }
+    # Reference image support — flux-2-pro only
+    if reference_urls and not mobile:
+        payload["image_prompt"] = reference_urls[0]  # style seed as primary reference
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{_BFL_BASE}/{model}",
+            headers={
+                "accept": "application/json",
+                "x-key": settings.bfl_api_key,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["polling_url"]
+
+
+async def _poll(polling_url: str) -> str:
+    """Poll until Ready, return image URL."""
+    deadline = asyncio.get_event_loop().time() + _POLL_TIMEOUT
+    async with httpx.AsyncClient() as client:
+        while asyncio.get_event_loop().time() < deadline:
+            resp = await client.get(
+                polling_url,
+                headers={"accept": "application/json", "x-key": settings.bfl_api_key},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("status") == "Ready":
+                return data["result"]["sample"]
+            if data.get("status") in ("Error", "Failed"):
+                raise RuntimeError(f"BFL generation failed: {data}")
+            await asyncio.sleep(_POLL_INTERVAL)
+    raise TimeoutError("BFL image generation timed out")
+
+
 async def generate_scene_image(
     scene_prompt: str,
     style_prefix: str,
-    style_negative: str,
-    reference_image_urls: list[str],  # style seed + up to 2 prior rooms
+    style_negative: str,         # BFL doesn't support negative prompts yet — kept for API compat
+    reference_image_urls: list[str],
     cache_key: str,
     mobile: bool = False,
 ) -> str:
-    """
-    Generate a scene image and save it locally. Returns the local file URL.
-    Caller is responsible for checking the cache before calling this.
-    """
+    """Generate image, save locally, return local URL path."""
     width, height = (512, 384) if mobile else (1024, 768)
     full_prompt = f"{style_prefix} {scene_prompt}".strip()
 
-    output = replicate.run(
-        "black-forest-labs/flux-dev",
-        input={
-            "prompt": full_prompt,
-            "negative_prompt": style_negative or "modern, anachronistic, text, UI elements, watermark",
-            "width": width,
-            "height": height,
-            "num_inference_steps": 20,
-            "guidance_scale": 3.5,
-            # reference images for style consistency
-            "image_urls": reference_image_urls[:3] if reference_image_urls else [],
-        },
-    )
-    # Replicate returns a URL; download and store locally
-    import httpx
+    polling_url = await _submit(full_prompt, width, height, reference_image_urls, mobile)
+    bfl_url = await _poll(polling_url)
+
+    # Download and store permanently
     async with httpx.AsyncClient() as client:
-        response = await client.get(str(output[0]))
-        response.raise_for_status()
+        resp = await client.get(bfl_url, timeout=30.0)
+        resp.raise_for_status()
 
     suffix = "_mobile" if mobile else ""
     out_path = _IMAGE_DIR / f"{cache_key}{suffix}.jpg"
-    out_path.write_bytes(response.content)
+    out_path.write_bytes(resp.content)
     return f"/images/{cache_key}{suffix}.jpg"
 
 
@@ -63,17 +102,17 @@ async def generate_style_seed(
     game_title: str,
     opening_description: str,
     style_prefix: str,
-    style_negative: str,
     style_id: str,
 ) -> str:
     """Generate the establishing shot used as style reference for all session images."""
     prompt = f"{style_prefix} {opening_description[:200]}. Title: {game_title}."
+    seed_key = f"seed_{style_id}_{hashlib.sha256(game_title.encode()).hexdigest()[:8]}"
     return await generate_scene_image(
         scene_prompt=prompt,
         style_prefix="",
-        style_negative=style_negative,
+        style_negative="",
         reference_image_urls=[],
-        cache_key=f"seed_{style_id}_{hashlib.sha256(game_title.encode()).hexdigest()[:8]}",
+        cache_key=seed_key,
     )
 
 
@@ -84,14 +123,11 @@ def build_scene_prompt(
     relevant_inventions: list[dict],
     world_bible: dict,
 ) -> str:
-    """Assemble the FLUX image prompt from game state + world knowledge."""
+    """Assemble the image prompt from game state + world knowledge."""
     palette = world_bible.get("sensory_palette", {})
     atmosphere = ", ".join(palette.get("sight", [])[:3])
-
     objects_desc = ", ".join(visible_objects[:6]) if visible_objects else ""
-    inventions_context = "; ".join(
-        i["canonical_text"][:80] for i in relevant_inventions[:3]
-    )
+    inventions_context = "; ".join(i["canonical_text"][:80] for i in relevant_inventions[:3])
 
     parts = [room_name]
     if room_description:
@@ -102,5 +138,4 @@ def build_scene_prompt(
         parts.append(atmosphere)
     if inventions_context:
         parts.append(inventions_context)
-
     return ". ".join(parts)
