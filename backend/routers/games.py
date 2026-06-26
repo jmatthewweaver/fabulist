@@ -97,11 +97,11 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(lambda: None)):
     if existing and existing.world_bible:
         return {"id": game_id, "status": "already_ingested"}
 
-    extractor = InfodumpExtractor()
+    extractor = InfodumpExtractor(infodump_path=settings.infodump_path)
     world_data = await extractor.extract(str(game_path))
 
     # Run the game briefly to get opening text
-    adapter = DfrotzAdapter()
+    adapter = DfrotzAdapter(dfrotz_path=settings.dfrotz_path)
     await adapter.start(str(game_path), f"ingest_{game_id}")
     opening_result = await adapter.step(f"ingest_{game_id}", "look")
     await adapter.stop(f"ingest_{game_id}")

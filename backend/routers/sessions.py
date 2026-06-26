@@ -44,7 +44,7 @@ async def create_session(
 
     # Start the game engine
     game_path = str(settings.games_dir / game.filename)
-    adapter = DfrotzAdapter()
+    adapter = DfrotzAdapter(dfrotz_path=settings.dfrotz_path)
     await adapter.start(game_path, session_id)
     session_store.put(ActiveSession(session_id=session_id, game_path=game_path, adapter=adapter))
 
@@ -108,7 +108,7 @@ async def restore_save(session_id: str, save_id: str, db: AsyncSession = Depends
         # Engine not running — restart from save
         game = await db.get(Game, db_session.game_id)
         game_path = str(settings.games_dir / game.filename)
-        adapter = DfrotzAdapter()
+        adapter = DfrotzAdapter(dfrotz_path=settings.dfrotz_path)
         await adapter.start(game_path, session_id)
         session_store.put(ActiveSession(session_id=session_id, game_path=game_path, adapter=adapter))
         active = session_store.get(session_id)

@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     saves_dir: Path = BASE_DIR / "saves"
     images_dir: Path = BASE_DIR / "images"
 
+    # Game engine binaries
+    dfrotz_path: str = "dfrotz"
+    infodump_path: str = "infodump"
+
     # Image generation mode:
     #   conservative = first visit to each room only
     #   normal       = enricher decides (dramatic moments, first visits, notable examines)
