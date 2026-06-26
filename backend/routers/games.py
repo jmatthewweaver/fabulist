@@ -128,4 +128,5 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(lambda: None)):
 
 def _detect_format(filename: str) -> str:
     ext = Path(filename).suffix.lower()
-    return {"z5": "zmachine", "z8": "zmachine", "ulx": "glulx"}.get(ext.lstrip("."), "unknown")
+    zmachine_exts = {"z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8"}
+    return "zmachine" if ext.lstrip(".") in zmachine_exts else {"ulx": "glulx"}.get(ext.lstrip("."), "unknown")
