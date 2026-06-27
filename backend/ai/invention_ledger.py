@@ -110,16 +110,17 @@ async def semantic_context(
     when the player enters a warm, smoky corridor.
     """
     query_embedding = _embed(scene_description)
+    emb_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
     result = await db.execute(
         text(
             "SELECT object_key, canonical_text, "
-            "1 - (embedding <=> :emb::vector) AS similarity "
+            f"1 - (embedding <=> '{emb_str}'::vector) AS similarity "
             "FROM inventions "
             "WHERE session_id = :sid AND embedding IS NOT NULL "
-            "ORDER BY embedding <=> :emb::vector "
+            f"ORDER BY embedding <=> '{emb_str}'::vector "
             "LIMIT :limit"
         ),
-        {"sid": session_id, "emb": str(query_embedding), "limit": limit},
+        {"sid": session_id, "limit": limit},
     )
     return [
         {"object_key": r.object_key, "canonical_text": r.canonical_text, "similarity": r.similarity}
