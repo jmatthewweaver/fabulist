@@ -103,8 +103,10 @@ async def play(websocket: WebSocket, playthrough_id: str):
         # First connect: run "look" on a fresh process with no prior save
         if (playthrough.turn_count or 0) == 0:
             try:
-                opening, initial_save = await run_one_turn(
-                    game_path, "look", None, settings.dfrotz_path
+                # persist=False: skip saving after "look" — initial game state is always
+                # reproducible from scratch, and the save command deadlocks on pipe buffering.
+                opening, _ = await run_one_turn(
+                    game_path, "look", None, settings.dfrotz_path, persist=False
                 )
             except Exception:
                 log.exception("Failed to start game: playthrough=%s game=%s path=%s",
@@ -114,7 +116,7 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 return
 
             opening_room = _extract_new_room(opening.raw_text) or ""
-            playthrough.engine_save = initial_save
+            # engine_save stays None; the first player command will start from initial game state
             playthrough.current_room = opening_room
             playthrough.context_json = context.to_json()
             playthrough.last_active = datetime.utcnow()
