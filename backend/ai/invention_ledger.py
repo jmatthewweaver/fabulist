@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import settings
 from ..models.db import Invention
 
-_claude = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+_claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 _openai = OpenAI(api_key=settings.openai_api_key)
 
 _EXTRACT_SYSTEM = """Extract invented object descriptions from this narrative text.
@@ -138,7 +138,7 @@ async def extract_and_store(
     turn: int,
 ) -> list[str]:
     """After enrichment, extract newly invented details and persist them (with embeddings)."""
-    response = _claude.messages.create(
+    response = await _claude.messages.create(
         model=settings.model_translation,
         max_tokens=512,
         system=_EXTRACT_SYSTEM,

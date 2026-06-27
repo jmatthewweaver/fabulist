@@ -4,13 +4,14 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 interface Props {
   text: string;
   isStreaming: boolean;
+  isConnecting: boolean;
   turnIndex: number;
   totalTurns: number;
   onPrev: () => void;
   onNext: () => void;
 }
 
-export function NarrativePanel({ text, isStreaming, turnIndex, totalTurns, onPrev, onNext }: Props) {
+export function NarrativePanel({ text, isStreaming, isConnecting, turnIndex, totalTurns, onPrev, onNext }: Props) {
   const canPrev = turnIndex > 0;
   const canNext = turnIndex < totalTurns - 1;
 
@@ -18,10 +19,21 @@ export function NarrativePanel({ text, isStreaming, turnIndex, totalTurns, onPre
     <div className="flex-1 flex flex-col min-h-0 px-5 py-4">
       {/* Narrative text — scrollable if very long, but showing just the current turn */}
       <div className="flex-1 overflow-y-auto">
-        <p className="narrative-text text-stone-200 whitespace-pre-wrap">
-          {text}
-          {isStreaming && <span className="animate-pulse text-stone-500">▍</span>}
-        </p>
+        {isConnecting ? (
+          <div className="flex items-center gap-2 text-stone-500 text-sm mt-2">
+            <span className="inline-flex gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-stone-500 animate-bounce [animation-delay:0ms]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-stone-500 animate-bounce [animation-delay:150ms]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-stone-500 animate-bounce [animation-delay:300ms]" />
+            </span>
+            <span>Entering the world...</span>
+          </div>
+        ) : (
+          <p className="narrative-text text-stone-200 whitespace-pre-wrap">
+            {text}
+            {isStreaming && <span className="animate-pulse text-stone-500">▍</span>}
+          </p>
+        )}
       </div>
 
       {/* Page controls */}

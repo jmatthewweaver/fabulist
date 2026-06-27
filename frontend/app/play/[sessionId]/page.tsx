@@ -23,6 +23,7 @@ export default function PlayPage() {
   const [currentTurn, setCurrentTurn] = useState(0);
   const [streamingText, setStreamingText] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(true);
   const [currentRoom, setCurrentRoom] = useState("");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
@@ -52,6 +53,7 @@ export default function PlayPage() {
       const msg = JSON.parse(event.data);
       switch (msg.type) {
         case "narrative_chunk":
+          setIsConnecting(false);
           pendingNarrativeRef.current.push(msg.text);
           setStreamingText((t) => t + msg.text);
           setIsStreaming(true);
@@ -114,6 +116,7 @@ export default function PlayPage() {
       <NarrativePanel
         text={narrativeToShow}
         isStreaming={isStreaming}
+        isConnecting={isConnecting}
         turnIndex={currentTurn}
         totalTurns={turns.length}
         onPrev={() => setCurrentTurn((i) => Math.max(0, i - 1))}
@@ -121,7 +124,7 @@ export default function PlayPage() {
       />
 
       {/* Input */}
-      <InputBar onSubmit={sendCommand} disabled={isStreaming} />
+      <InputBar onSubmit={sendCommand} disabled={isStreaming || isConnecting} />
     </div>
   );
 }

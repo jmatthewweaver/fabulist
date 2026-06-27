@@ -16,7 +16,7 @@ import anthropic
 from ..config import settings
 from .context_manager import ContextBundle
 
-_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 # --- Image suggestion instructions per mode ---
 
@@ -51,10 +51,8 @@ Rules:
 3. Use the World Bible for tone, style, and period conventions.
 4. If an object's description appears in Established Descriptions, use it verbatim.
 5. Do not mention items or characters not present in the game's output.
-6. Output only narrative prose — no meta-commentary, no score, no inventory lists.
-7. Keep responses concise (2-4 paragraphs maximum).
-
-{image_instructions}"""
+6. Output only narrative prose — no meta-commentary, no score, no inventory lists, no image suggestions.
+7. Keep responses concise (2-4 paragraphs maximum)."""
 
 _IMAGE_EXTRACT_SYSTEM = """Given this narrative, determine if an image should be generated.
 If yes, return JSON: {{"suggest": true, "type": "<room_wide|object_closeup|scene_moment|view|inventory_still>", "subject": "<what to depict>", "prompt_hint": "<concise visual description for image generation, ~20 words>"}}
@@ -63,8 +61,7 @@ Return only valid JSON."""
 
 
 def _system_prompt() -> str:
-    instructions = _IMAGE_INSTRUCTIONS.get(settings.image_mode, _IMAGE_INSTRUCTIONS["normal"])
-    return _SYSTEM_TEMPLATE.format(image_instructions=instructions)
+    return _SYSTEM_TEMPLATE
 
 
 def _build_user_prompt(raw_output: str, bundle: ContextBundle) -> str:
@@ -97,13 +94,13 @@ def _build_user_prompt(raw_output: str, bundle: ContextBundle) -> str:
 async def enrich_stream(raw_output: str, bundle: ContextBundle) -> AsyncIterator[str]:
     """Yields narrative text chunks as they stream."""
     prompt = _build_user_prompt(raw_output, bundle)
-    with _client.messages.stream(
+    async with _client.messages.stream(
         model=settings.model_enrichment,
         max_tokens=600,
         system=_system_prompt(),
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
-        for text in stream.text_stream:
+        async for text in stream.text_stream:
             yield text
 
 
@@ -122,7 +119,7 @@ async def extract_image_suggestion(
         return None
 
     context = f"Room: {current_room}\nGame output: {raw_output[:300]}\nNarrative: {narrative[:500]}"
-    response = _client.messages.create(
+    response = await _client.messages.create(
         model=settings.model_translation,  # Haiku — cheap
         max_tokens=150,
         system=_IMAGE_EXTRACT_SYSTEM,
