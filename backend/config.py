@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # Game engine binaries
     dfrotz_path: str = "dfrotz"
     infodump_path: str = "infodump"
+    txd_path: str = "txd"
 
     # Image generation mode:
     #   conservative = first visit to each room only

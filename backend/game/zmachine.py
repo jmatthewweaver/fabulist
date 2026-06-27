@@ -205,6 +205,61 @@ def _get_routine_prop(
 # Public API
 # ---------------------------------------------------------------------------
 
+def routine_props_by_id(
+    game_path: str,
+    prop_nums: tuple[int, ...] | None = (PROP_LDESC, PROP_FDESC),
+) -> dict[int, dict[int, int]]:
+    """
+    For every object, return its 2-byte property values that point at routines:
+        {obj_id: {prop_num: packed_routine_address, ...}, ...}
+
+    `prop_nums` filters which properties to collect (default: LDESC=17, FDESC=11);
+    pass None to collect every 2-byte property (wider candidate net).
+
+    The packed value is a ZIL routine packed address — byte address = value * 2.
+    This is the id-keyed join key for txd-sourced description candidates (Step 2):
+    object id -> routine address -> txd's decoded PRINT strings.
+    """
+    data = Path(game_path).read_bytes()
+    if data[0] != 3:
+        raise ValueError(f"Only Z-machine v3 is supported (this file is v{data[0]})")
+
+    obj_table = struct.unpack_from(">H", data, 0x0A)[0]
+    first_obj = obj_table + 31 * 2
+    OBJ_ENTRY = 9
+
+    result: dict[int, dict[int, int]] = {}
+    for obj_id in range(1, 256):
+        entry = first_obj + (obj_id - 1) * OBJ_ENTRY
+        if entry + OBJ_ENTRY > len(data):
+            break
+        prop_addr = struct.unpack_from(">H", data, entry + 7)[0]
+        if prop_addr == 0 or prop_addr >= len(data):
+            break
+
+        name_words = data[prop_addr]
+        if name_words > 20:
+            break       # walked off the object table into garbage
+
+        props: dict[int, int] = {}
+        pos = prop_addr + 1 + name_words * 2
+        while pos < len(data):
+            sb = data[pos]
+            if sb == 0:
+                break
+            num = sb & 0x1F
+            size = (sb >> 5) + 1
+            pos += 1
+            if size == 2 and (prop_nums is None or num in prop_nums):
+                props[num] = struct.unpack_from(">H", data, pos)[0]
+            pos += size
+
+        if props:
+            result[obj_id] = props
+
+    return result
+
+
 def _read_flat_objects(
     data: bytes,
     abbreviations: list[str],

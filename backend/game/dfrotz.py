@@ -126,8 +126,11 @@ class InfodumpExtractor(WorldExtractor):
 
     async def extract(self, game_path: str) -> StaticWorldData:
         try:
+            # -f: full dump — includes the '**** Object tree ****' section that
+            # _parse_object_tree needs (plain -o omits it), plus grammar/dictionary
+            # for vocab. raw_dump isn't sent to the LLM, so the extra size is free.
             result = subprocess.run(
-                [self._infodump_path, "-o", game_path],
+                [self._infodump_path, "-f", game_path],
                 capture_output=True, text=True, timeout=30,
             )
             raw = result.stdout

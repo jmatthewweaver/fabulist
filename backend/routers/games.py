@@ -14,6 +14,8 @@ from sqlalchemy import select
 
 from ..models.db import Game, Playthrough, Style
 from ..game.dfrotz import InfodumpExtractor, run_one_turn
+from ..game.zmachine import routine_props_by_id
+from ..game.txd import extract_candidates
 from ..ai.world_bible import generate_world_bible, build_vocab_index
 from ..config import settings
 from ..deps import get_db
@@ -101,10 +103,23 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     )
     opening_text = opening_result.raw_text
 
-    # Object containment tree (id-keyed) parsed from infodump. Descriptions are
-    # attached in a later step; here we capture names + hierarchy only.
+    # Object containment tree (id-keyed) parsed from infodump.
     known_objects = world_data.object_tree or {}
-    log.info("Object tree: %d nodes from %s", len(known_objects.get("nodes", {})), filename)
+    nodes = known_objects.get("nodes", {})
+    log.info("Object tree: %d nodes from %s", len(nodes), filename)
+
+    # Attach clean description candidates per object via txd (Step 2). Failure here
+    # must not block ingestion — candidates simply stay empty.
+    try:
+        prop_addrs = routine_props_by_id(str(game_path))
+        candidates = extract_candidates(str(game_path), prop_addrs, settings.txd_path)
+        for obj_id, strings in candidates.items():
+            node = nodes.get(str(obj_id))
+            if node:
+                node["candidates"] = strings
+        log.info("txd: candidates for %d/%d objects", len(candidates), len(nodes))
+    except Exception:
+        log.warning("txd candidate extraction failed for %s", filename, exc_info=True)
 
     world_bible_dict = await generate_world_bible(world_data, opening_text, game_path.stem)
     world_bible_dict["known_objects"] = known_objects
