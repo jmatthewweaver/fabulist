@@ -1,21 +1,28 @@
 """
-DfrotzAdapter: runs dfrotz as a subprocess, communicates via stdin/stdout.
+DfrotzAdapter: runs dfrotz as a subprocess via a pty so it behaves interactively.
 InfodumpExtractor: runs infodump (ztools) to extract Z-machine world data.
 
 run_one_turn(): stateless helper — start → restore → command → save → stop.
+
+Why pty: when dfrotz's stdin/stdout are pipes, isatty() returns False and libc
+may buffer stdout. Using a pty makes dfrotz think it's attached to a terminal,
+ensuring line-buffered output and correct interactive save/restore prompts.
 """
 import asyncio
+import fcntl
 import logging
+import os
+import pty
 import re
 import subprocess
 import tempfile
+import termios
 from pathlib import Path
 
 from .adapter import GameEngineAdapter, WorldExtractor, StaticWorldData, StepResult
 
 log = logging.getLogger(__name__)
 
-# Patterns that indicate the game rejected the command
 _REJECTION_PATTERNS = re.compile(
     r"(i don'?t (understand|know the word)|"
     r"you can'?t|"
@@ -26,37 +33,87 @@ _REJECTION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-_PROMPT = b">"
-
 
 class DfrotzAdapter(GameEngineAdapter):
     def __init__(self, dfrotz_path: str = "dfrotz"):
         self._dfrotz_path = dfrotz_path
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._master_fds: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def start(self, game_path: str, session_id: str) -> None:
-        # stdbuf -o0 forces unbuffered stdout so dfrotz's prompts (e.g. save filename)
-        # flush immediately to the pipe rather than deadlocking in libc's 4KB buffer.
-        log.debug("Starting dfrotz: %s %s", self._dfrotz_path, game_path)
+        master_fd, slave_fd = pty.openpty()
+
+        # Disable echo on slave so our written commands don't appear in output
+        attrs = termios.tcgetattr(slave_fd)
+        attrs[3] &= ~termios.ECHO
+        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+
+        # Non-blocking master so os.read() never blocks in the event loop callback
+        fl = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+        log.debug("Starting dfrotz via pty: %s %s", self._dfrotz_path, game_path)
         proc = await asyncio.create_subprocess_exec(
-            "stdbuf", "-o0", self._dfrotz_path, "-p", "-m", game_path,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
+            self._dfrotz_path, "-p", "-m", game_path,
+            stdin=slave_fd,
+            stdout=slave_fd,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        os.close(slave_fd)
+
         self._processes[session_id] = proc
+        self._master_fds[session_id] = master_fd
         self._locks[session_id] = asyncio.Lock()
-        # Consume the opening banner
-        await self._read_until_prompt(proc)
+
+        await self._read_until_prompt(master_fd)
         log.debug("dfrotz ready (pid=%s)", proc.pid)
 
+    async def _read_chunk(self, fd: int, timeout: float = 10.0) -> bytes:
+        """Read up to 256 bytes from fd, waiting asynchronously."""
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[bytes] = loop.create_future()
+
+        def on_readable():
+            try:
+                data = os.read(fd, 256)
+            except BlockingIOError:
+                return  # spurious wakeup; leave reader registered
+            except OSError as exc:
+                loop.remove_reader(fd)
+                if not fut.done():
+                    fut.set_exception(exc)
+                return
+            loop.remove_reader(fd)
+            if not fut.done():
+                fut.set_result(data)
+
+        loop.add_reader(fd, on_readable)
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except BaseException:
+            loop.remove_reader(fd)
+            raise
+
+    async def _read_until_prompt(self, fd: int) -> str:
+        """Read from the pty master until a bare '>' prompt appears."""
+        buf = bytearray()
+        while True:
+            chunk = await self._read_chunk(fd)
+            buf.extend(chunk)
+            # Pty ONLCR converts \n→\r\n; normalise before checking
+            clean = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            if clean.rstrip().endswith(b">"):
+                break
+        text = buf.decode("latin-1", errors="replace")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return re.sub(r"\s*>\s*$", "", text)
+
     async def step(self, session_id: str, command: str) -> StepResult:
-        proc = self._processes[session_id]
+        fd = self._master_fds[session_id]
         async with self._locks[session_id]:
-            proc.stdin.write(f"{command}\n".encode())
-            await proc.stdin.drain()
-            raw = await self._read_until_prompt(proc)
+            os.write(fd, f"{command}\n".encode())
+            raw = await self._read_until_prompt(fd)
         text = raw.strip()
         rejected = bool(_REJECTION_PATTERNS.search(text))
         return StepResult(raw_text=text, rejected=rejected)
@@ -81,26 +138,23 @@ class DfrotzAdapter(GameEngineAdapter):
 
     async def stop(self, session_id: str) -> None:
         proc = self._processes.pop(session_id, None)
+        fd = self._master_fds.pop(session_id, None)
         self._locks.pop(session_id, None)
+        if fd is not None:
+            try:
+                os.write(fd, b"quit\ny\n")
+            except OSError:
+                pass
         if proc:
             try:
-                proc.stdin.write(b"quit\ny\n")
-                await proc.stdin.drain()
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
             except Exception:
                 proc.kill()
-
-    async def _read_until_prompt(self, proc: asyncio.subprocess.Process) -> str:
-        buf = bytearray()
-        while True:
-            chunk = await asyncio.wait_for(proc.stdout.read(256), timeout=10.0)
-            if not chunk:
-                break
-            buf.extend(chunk)
-            if buf.rstrip().endswith(b">"):
-                break
-        text = buf.decode("latin-1", errors="replace")
-        return re.sub(r"\s*>\s*$", "", text)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 async def run_one_turn(
@@ -113,9 +167,8 @@ async def run_one_turn(
     """
     Stateless per-turn execution: start → restore (if save_bytes) → command → save → stop.
 
-    persist=False skips the save step and returns None as new_save_bytes. Use this
-    for read-only commands (e.g. the opening "look") where the initial game state is
-    always reproducible and saving would deadlock on stdout buffering.
+    persist=False skips the save step; use for the opening 'look' where the initial
+    game state is always reproducible and saving is unnecessary.
     """
     log.info("run_one_turn: cmd=%r save=%s bytes persist=%s",
              command, len(save_bytes) if save_bytes else 0, persist)
@@ -124,7 +177,7 @@ async def run_one_turn(
     try:
         await adapter.start(game_path, sid)
     except FileNotFoundError:
-        raise RuntimeError(f"dfrotz or stdbuf not found — check PATH (dfrotz_path={dfrotz_path!r})")
+        raise RuntimeError(f"dfrotz not found at {dfrotz_path!r} — is it installed?")
     except asyncio.TimeoutError:
         raise RuntimeError(f"dfrotz timed out starting {game_path!r} — is the game file valid?")
     try:
