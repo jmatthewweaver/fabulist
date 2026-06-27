@@ -8,7 +8,7 @@ import anthropic
 from ..config import settings
 from ..game.adapter import StaticWorldData
 
-_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 _SYSTEM = """You are analyzing an interactive fiction game to produce a World Bible.
 This document will guide an AI narrator that enriches the game's descriptions with
@@ -55,9 +55,9 @@ async def generate_world_bible(
         opening_text=opening_text[:1000],
     )
 
-    response = _client.messages.create(
+    response = await _client.messages.create(
         model=settings.model_enrichment,
-        max_tokens=1024,
+        max_tokens=4096,
         system=_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )
