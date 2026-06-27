@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 from .config import settings
 from .deps import engine
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Fabulist", lifespan=lifespan)
 
+app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_url],
