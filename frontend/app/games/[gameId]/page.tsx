@@ -75,11 +75,11 @@ export default function GamePage() {
       </div>
 
       {/* Saves */}
-      {game.saves.length > 0 && (
+      {(game.saves ?? []).length > 0 && (
         <section className="mb-6">
           <h2 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-3">Continue</h2>
           <div className="grid gap-2">
-            {game.saves.map((save) => (
+            {(game.saves ?? []).map((save) => (
               <button
                 key={save.id}
                 onClick={() => resume(save)}
