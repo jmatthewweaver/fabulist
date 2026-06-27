@@ -41,7 +41,7 @@ class DfrotzAdapter(GameEngineAdapter):
             self._dfrotz_path, "-p", "-m", game_path,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         self._processes[session_id] = proc
         self._locks[session_id] = asyncio.Lock()
