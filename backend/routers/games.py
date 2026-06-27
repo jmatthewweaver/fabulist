@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from ..models.db import Game, Playthrough, Style
-from ..game.dfrotz import DfrotzAdapter, InfodumpExtractor
+from ..game.dfrotz import InfodumpExtractor, run_one_turn
 from ..ai.world_bible import generate_world_bible, build_vocab_index
 from ..config import settings
 from ..deps import get_db
@@ -93,10 +93,9 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     extractor = InfodumpExtractor(infodump_path=settings.infodump_path)
     world_data = await extractor.extract(str(game_path))
 
-    adapter = DfrotzAdapter(dfrotz_path=settings.dfrotz_path)
-    await adapter.start(str(game_path), f"ingest_{game_id}")
-    opening_result = await adapter.step(f"ingest_{game_id}", "look")
-    await adapter.stop(f"ingest_{game_id}")
+    opening_result, _ = await run_one_turn(
+        str(game_path), "look", None, settings.dfrotz_path, persist=False
+    )
     opening_text = opening_result.raw_text
 
     world_bible_dict = await generate_world_bible(world_data, opening_text, game_path.stem)
