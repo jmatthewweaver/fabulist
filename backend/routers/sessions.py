@@ -43,7 +43,7 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
 ):
     game_id = body.game_id
-    style_id = body.style_id or ""
+    style_id = body.style_id or "default"
     user_id = _get_user_id(request)
     game = await db.get(Game, game_id)
     if not game:
