@@ -59,7 +59,7 @@ class Session(Base):
     id = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     game_id = Column(String, ForeignKey("games.id"), nullable=False)
-    style_id = Column(String, ForeignKey("styles.id"), nullable=False)
+    style_id = Column(String, ForeignKey("styles.id"), nullable=True)
     current_room = Column(String)
     turn_count = Column(Integer, default=0)
     context_json = Column(JSONB)                    # serialized ContextManager state

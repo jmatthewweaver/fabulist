@@ -19,6 +19,7 @@ async def lifespan(app: FastAPI):
     settings.games_dir.mkdir(exist_ok=True)
     settings.saves_dir.mkdir(exist_ok=True)
     settings.images_dir.mkdir(exist_ok=True)
+    await _seed_styles()
     yield
 
 
@@ -34,6 +35,25 @@ app.add_middleware(
 )
 
 app.mount("/images", StaticFiles(directory=str(settings.images_dir)), name="images")
+
+async def _seed_styles():
+    from .models.db import Style
+    from .deps import AsyncSessionLocal
+    from sqlalchemy import select
+    async with AsyncSessionLocal() as db:
+        existing = await db.execute(select(Style).limit(1))
+        if existing.scalar():
+            return
+        db.add(Style(
+            id="default",
+            name="Classic Illustrated",
+            description="Painterly illustrations in the style of classic fantasy book covers.",
+            flux_prompt_prefix="detailed oil painting, fantasy book illustration, warm lighting,",
+            flux_negative_prompt="photorealistic, modern, sci-fi",
+            tone_instructions="Enrich descriptions with vivid sensory detail and a sense of wonder.",
+        ))
+        await db.commit()
+
 
 from .routers.auth import router as auth_router
 from .routers.games import router as games_router
