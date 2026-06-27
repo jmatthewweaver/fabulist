@@ -9,6 +9,7 @@ class StaticWorldData:
     objects: list[dict] = field(default_factory=list)      # [{id, name, parent, description, attrs}]
     vocab_verbs: list[str] = field(default_factory=list)
     vocab_nouns: list[str] = field(default_factory=list)
+    object_tree: dict = field(default_factory=dict)        # {nodes:{id:{...}}, roots:[...], name_index:{...}}
     game_title: str = ""
     game_format: str = ""
     raw_dump: str = ""  # full infodump text, for world bible generation

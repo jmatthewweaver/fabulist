@@ -64,8 +64,76 @@ def _system_prompt() -> str:
     return _SYSTEM_TEMPLATE
 
 
+def _scene_knowledge(
+    known_objects: dict,
+    raw_output: str,
+    current_room: str,
+    limit: int = 10,
+) -> str:
+    """
+    Build a compact scene-knowledge block for the enricher prompt from the id-keyed
+    object tree ({nodes, roots, name_index}).
+
+    Includes:
+      - Current room (resolved via name_index) and its description, if known
+      - Room's initial contents and their descriptions (one container level deep)
+      - Other objects named in raw_output that carry a known description
+
+    Descriptions may be empty (populated in a later pipeline step); contents names
+    alone are still useful context.  Returns "" if the structure isn't present.
+    """
+    nodes = known_objects.get("nodes")
+    if not nodes:
+        return ""
+    name_index = known_objects.get("name_index", {})
+    raw_lower = raw_output.lower()
+
+    def labeled(node: dict, tag: str) -> str:
+        desc = node.get("description", "")
+        return f"{tag} {node['name']}" + (f": {desc}" if desc else "")
+
+    lines: list[str] = []
+    seen: set[int] = set()
+
+    room_ids = name_index.get(current_room.strip().lower(), [])
+    room_node = nodes.get(str(room_ids[0])) if room_ids else None
+    if room_node:
+        lines.append(labeled(room_node, "[Room]"))
+        seen.add(room_node["id"])
+        for cid in room_node.get("children", []):
+            child = nodes.get(str(cid))
+            if not child:
+                continue
+            lines.append(labeled(child, "[In room]"))
+            seen.add(child["id"])
+            for gcid in child.get("children", []):
+                gc = nodes.get(str(gcid))
+                if not gc or gc["id"] in seen:
+                    continue
+                lines.append(labeled(gc, f"  [Inside {child['name']}]"))
+                seen.add(gc["id"])
+            if len(lines) >= limit:
+                break
+
+    # Objects mentioned in game output but not already covered (need a description)
+    for node in nodes.values():
+        if len(lines) >= limit:
+            break
+        nm = node["name"].strip().lower()
+        if node["id"] not in seen and nm and nm in raw_lower and node.get("description"):
+            lines.append(labeled(node, "[Mentioned]"))
+            seen.add(node["id"])
+
+    return "\n".join(lines)
+
+
 def _build_user_prompt(raw_output: str, bundle: ContextBundle) -> str:
     world_bible = bundle.world_bible if isinstance(bundle.world_bible, dict) else json.loads(bundle.world_bible)
+    # Extract known_objects separately — too large to include in the full bible dump
+    world_bible = dict(world_bible)
+    known_objects: dict[str, dict] = world_bible.pop("known_objects", {})
+    # Back-compat: older ingestions stored flat known_descriptions
+    known_descriptions: dict[str, str] = world_bible.pop("known_descriptions", {})
 
     sections = [
         f"## World Bible\n{json.dumps(world_bible, indent=2)}",
@@ -73,6 +141,21 @@ def _build_user_prompt(raw_output: str, bundle: ContextBundle) -> str:
     ]
     if bundle.current_inventory:
         sections.append(f"## Inventory\n{', '.join(bundle.current_inventory)}")
+
+    # Scene knowledge: room description + contents (game ground truth)
+    scene = _scene_knowledge(known_objects, raw_output, bundle.current_room)
+    if not scene and known_descriptions:
+        # Fallback for old world bibles that only have flat descriptions
+        raw_lower = raw_output.lower()
+        room_lower = bundle.current_room.lower()
+        relevant = {k: v for k, v in known_descriptions.items()
+                    if k.lower() == room_lower or k.lower() in raw_lower}
+        scene = "\n".join(f"- {k}: {v}" for k, v in list(relevant.items())[:8])
+    if scene:
+        sections.append(
+            f"## Scene Knowledge (game ground truth — use verbatim, do not reinvent)\n{scene}"
+        )
+
     if bundle.relevant_inventions:
         inv_text = "\n".join(
             f"- {i['object_key']}: {i['canonical_text']}"

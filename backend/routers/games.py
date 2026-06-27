@@ -3,7 +3,10 @@ Game library endpoints: list games, get game details + user's playthroughs.
 Also: game ingestion trigger.
 """
 import hashlib
+import logging
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,7 +101,13 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     )
     opening_text = opening_result.raw_text
 
+    # Object containment tree (id-keyed) parsed from infodump. Descriptions are
+    # attached in a later step; here we capture names + hierarchy only.
+    known_objects = world_data.object_tree or {}
+    log.info("Object tree: %d nodes from %s", len(known_objects.get("nodes", {})), filename)
+
     world_bible_dict = await generate_world_bible(world_data, opening_text, game_path.stem)
+    world_bible_dict["known_objects"] = known_objects
     vocab_index = build_vocab_index(world_data)
 
     import json

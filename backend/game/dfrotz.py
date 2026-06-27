@@ -139,6 +139,7 @@ class InfodumpExtractor(WorldExtractor):
             objects=_parse_objects(raw),
             vocab_verbs=_parse_verbs(raw),
             vocab_nouns=_parse_nouns(raw),
+            object_tree=_parse_object_tree(raw),
             raw_dump=raw,
         )
 
@@ -160,6 +161,99 @@ def _parse_objects(dump: str) -> list[dict]:
         if name_match:
             objects.append({"name": name_match.group(1), "raw": block})
     return objects
+
+
+# Matches one line of infodump's object-tree section, e.g.  ` .  . [230] "small mailbox"`
+# The leading indent is a run of spaces and '.' characters; depth = number of dots.
+_TREE_LINE = re.compile(r'^(?P<indent>[ .]*)\[\s*(?P<id>\d+)\]\s+"(?P<name>.*)"\s*$')
+
+
+def _parse_object_tree(dump: str) -> dict:
+    """
+    Parse infodump's '**** Object tree ****' section into an id-keyed structure:
+        {nodes: {str(id): {id, name, parent, children, kind, description, candidates}},
+         roots: [id, ...],
+         name_index: {lowercased_name: [id, ...]}}
+
+    Blank-named pseudo-containers are relabeled for readability (decision in plan):
+      - the blank root with the most children      -> "Rooms"     (kind=container)
+      - any other blank container                  -> "Global Objects" (kind=container)
+      - a root named like the player avatar         -> "Player"    (kind=player)
+    Children of the Rooms container are kind=room; everything else with a real name
+    is kind=object.  Returns {} if the section is absent (graceful degrade).
+    """
+    start = dump.find("**** Object tree ****")
+    if start == -1:
+        return {}
+    rest = dump[start + len("**** Object tree ****"):]
+    end = rest.find("****")          # next banner ends the section
+    section = rest[:end] if end != -1 else rest
+
+    nodes: dict[str, dict] = {}
+    roots: list[int] = []
+    stack: list[int] = []            # stack[d] = id of the most recent node at depth d
+
+    for line in section.splitlines():
+        m = _TREE_LINE.match(line)
+        if not m:
+            continue
+        depth = m.group("indent").count(".")
+        oid = int(m.group("id"))
+
+        del stack[depth:]            # keep ancestors at depths 0..depth-1
+        parent = stack[depth - 1] if depth > 0 and len(stack) >= depth else None
+        stack.append(oid)
+
+        nodes[str(oid)] = {
+            "id": oid,
+            "name": m.group("name"),
+            "parent": parent,
+            "children": [],
+            "kind": "object",
+            "description": "",
+            "candidates": [],
+        }
+        if parent is None:
+            roots.append(oid)
+        elif str(parent) in nodes:
+            nodes[str(parent)]["children"].append(oid)
+
+    if not nodes:
+        return {}
+
+    # --- pseudo-container heuristics ---
+    blank_roots = [nodes[str(r)] for r in roots if nodes[str(r)]["name"] == ""]
+    rooms_container_id = (
+        max(blank_roots, key=lambda n: len(n["children"]))["id"] if blank_roots else None
+    )
+
+    # The player avatar is a top-level object; match by common ZIL names (the
+    # "you"/"hands" pseudo-objects live under the globals container, not here).
+    player_names = {"cretin", "adventurer", "yourself", "you"}
+    player_id = next(
+        (r for r in roots if nodes[str(r)]["name"].strip().lower() in player_names),
+        None,
+    )
+
+    for node in nodes.values():
+        if node["id"] == rooms_container_id:
+            node["name"], node["kind"] = "Rooms", "container"
+        elif node["id"] == player_id:
+            node["name"], node["kind"] = "Player", "player"
+        elif node["name"] == "" and node["children"]:
+            node["name"], node["kind"] = "Global Objects", "container"
+        elif node["parent"] == rooms_container_id:
+            node["kind"] = "room"
+        else:
+            node["kind"] = "object"
+
+    name_index: dict[str, list[int]] = {}
+    for node in nodes.values():
+        key = node["name"].strip().lower()
+        if key:
+            name_index.setdefault(key, []).append(node["id"])
+
+    return {"nodes": nodes, "roots": roots, "name_index": name_index}
 
 
 def _parse_verbs(dump: str) -> list[str]:

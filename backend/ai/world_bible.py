@@ -22,6 +22,9 @@ Infodump summary (rooms, objects, vocabulary extracted from the game file):
 Opening game text (first 1000 chars of gameplay):
 {opening_text}
 
+Sample object/room descriptions (actual in-game text — use these for tone and vocabulary calibration):
+{description_samples}
+
 Produce a World Bible as JSON with these fields:
 - title: string
 - setting: string (2-3 sentence description of the world)
@@ -39,6 +42,7 @@ async def generate_world_bible(
     world_data: StaticWorldData,
     opening_text: str,
     game_title: str,
+    descriptions: dict[str, str] | None = None,
 ) -> dict:
     # Summarize the infodump into something manageable
     room_names = [r["name"] for r in world_data.rooms[:30]]
@@ -49,10 +53,18 @@ async def generate_world_bible(
         f"Verbs: {', '.join(world_data.vocab_verbs[:30])}"
     )
 
+    # Pick a representative sample of descriptions for the LLM to calibrate tone/style
+    sample_items = list((descriptions or {}).items())[:15]
+    description_samples = (
+        "\n".join(f"- {k}: {v}" for k, v in sample_items)
+        if sample_items else "(none available)"
+    )
+
     prompt = _PROMPT_TEMPLATE.format(
         title=game_title,
         world_summary=world_summary,
         opening_text=opening_text[:1000],
+        description_samples=description_samples,
     )
 
     response = await _client.messages.create(
