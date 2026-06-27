@@ -123,17 +123,24 @@ async def play(websocket: WebSocket, playthrough_id: str):
             await db.commit()
 
             bundle = context.build_bundle(current_room=opening_room, current_inventory=[], relevant_inventions=[])
+            opening_narrative: list[str] = []
             async for chunk in enrich_stream(opening.raw_text, bundle):
                 await websocket.send_json({"type": "narrative_chunk", "text": chunk})
+                opening_narrative.append(chunk)
             await websocket.send_json({"type": "narrative_done"})
             log.info("Opening scene: room=%r", opening_room)
             await websocket.send_json({"type": "game_state", "room": opening_room, "inventory": [], "turn": 0})
-            asyncio.create_task(_generate_and_push(
-                websocket,
-                {"suggest": True, "type": "room_wide", "subject": opening_room,
-                 "prompt_hint": f"{opening_room} interior, opening scene"},
-                opening_room, playthrough_id, style_prefix,
-            ))
+
+            async def _opening_image():
+                suggestion = await extract_image_suggestion(
+                    narrative="".join(opening_narrative),
+                    raw_output=opening.raw_text,
+                    current_room=opening_room,
+                    is_new_room=True,
+                )
+                if suggestion:
+                    await _generate_and_push(websocket, suggestion, opening_room, playthrough_id, style_prefix)
+            asyncio.create_task(_opening_image())
 
         try:
             while True:
