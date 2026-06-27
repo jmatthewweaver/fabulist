@@ -67,8 +67,9 @@ async def play(websocket: WebSocket, session_id: str):
         db_session: DbSession = await db.get(DbSession, session_id)
         game: Game = await db.get(Game, db_session.game_id)
         context = ContextManager.from_json(db_session.context_json)
-        vocab_index: dict = game.vocab_index or {}
-        world_bible: dict = game.world_bible or {}
+        import json as _json
+        vocab_index: dict = game.vocab_index if isinstance(game.vocab_index, dict) else _json.loads(game.vocab_index or "{}")
+        world_bible: dict = game.world_bible if isinstance(game.world_bible, dict) else _json.loads(game.world_bible or "{}")
         vocab_verbs: list = world_bible.get("vocab_verbs", [])
         vocab_nouns: list = world_bible.get("vocab_nouns", [])
         style_prefix: str = ""  # TODO: load from Style record
