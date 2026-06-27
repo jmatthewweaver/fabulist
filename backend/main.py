@@ -1,3 +1,5 @@
+import logging
+import logging.config
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,6 +10,26 @@ from starlette.middleware.sessions import SessionMiddleware
 from .config import settings
 from .deps import engine
 from .models.db import Base
+
+logging.config.dictConfig({
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "default": {"format": "%(asctime)s %(levelname)-8s %(name)s: %(message)s"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "default"},
+    },
+    "root": {"handlers": ["console"], "level": settings.log_level},
+    "loggers": {
+        # Silence SQLAlchemy's per-query noise; only show warnings+
+        "sqlalchemy.engine": {"level": "WARNING", "propagate": False, "handlers": ["console"]},
+        "sqlalchemy.pool": {"level": "WARNING", "propagate": False, "handlers": ["console"]},
+        # uvicorn access log is useful at INFO; keep it
+        "uvicorn.access": {"level": "INFO", "propagate": False, "handlers": ["console"]},
+        "uvicorn.error": {"level": "INFO", "propagate": False, "handlers": ["console"]},
+    },
+})
 
 
 @asynccontextmanager

@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     # App
     frontend_url: str = "http://localhost:3000"
     debug: bool = False
+    log_level: str = "INFO"
 
     class Config:
         env_file = ".env"

@@ -17,9 +17,12 @@ Message protocol (server → client):
 """
 import asyncio
 import json
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+log = logging.getLogger(__name__)
 
 from ..deps import AsyncSessionLocal
 from ..ai import invention_ledger
@@ -56,6 +59,7 @@ async def _generate_and_push(
 ):
     try:
         from ..media.image_generator import generate_scene_image, make_cache_key
+        log.info("Generating image for room=%r hint=%r", current_room, suggestion.get("prompt_hint"))
         cache_key = make_cache_key(playthrough_id, current_room, [], "default")
         url = await generate_scene_image(
             scene_prompt=suggestion.get("prompt_hint", current_room),
@@ -64,24 +68,28 @@ async def _generate_and_push(
             reference_image_urls=[],
             cache_key=cache_key,
         )
+        log.info("Image ready: %s", url)
         await websocket.send_json({"type": "image_ready", "url": url, "subject": suggestion.get("subject", "")})
     except Exception:
-        pass
+        log.exception("Image generation failed for playthrough=%s room=%r", playthrough_id, current_room)
 
 
 @router.websocket("/api/playthroughs/{playthrough_id}/play")
 async def play(websocket: WebSocket, playthrough_id: str):
     await websocket.accept()
+    log.info("WebSocket connected: playthrough=%s", playthrough_id)
 
     async with AsyncSessionLocal() as db:
         playthrough: Playthrough = await db.get(Playthrough, playthrough_id)
         if not playthrough:
+            log.warning("Playthrough not found: %s", playthrough_id)
             await websocket.send_json({"type": "error", "message": "Playthrough not found."})
             await websocket.close()
             return
 
         game: Game = await db.get(Game, playthrough.game_id)
         game_path = str(settings.games_dir / game.filename)
+        log.info("Starting game: %s (turn=%s)", game.title, playthrough.turn_count)
         context = ContextManager.from_json(playthrough.context_json)
 
         world_bible: dict = game.world_bible if isinstance(game.world_bible, dict) else json.loads(game.world_bible or "{}")
@@ -98,8 +106,10 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 opening, initial_save = await run_one_turn(
                     game_path, "look", None, settings.dfrotz_path
                 )
-            except Exception as e:
-                await websocket.send_json({"type": "error", "message": f"Failed to start game: {e}"})
+            except Exception:
+                log.exception("Failed to start game: playthrough=%s game=%s path=%s",
+                              playthrough_id, game.title, game_path)
+                await websocket.send_json({"type": "error", "message": "Failed to start the game engine. Check server logs."})
                 await websocket.close()
                 return
 
@@ -114,6 +124,7 @@ async def play(websocket: WebSocket, playthrough_id: str):
             async for chunk in enrich_stream(opening.raw_text, bundle):
                 await websocket.send_json({"type": "narrative_chunk", "text": chunk})
             await websocket.send_json({"type": "narrative_done"})
+            log.info("Opening scene: room=%r", opening_room)
             await websocket.send_json({"type": "game_state", "room": opening_room, "inventory": [], "turn": 0})
             asyncio.create_task(_generate_and_push(
                 websocket,
@@ -170,8 +181,15 @@ async def play(websocket: WebSocket, playthrough_id: str):
                         vocab_index=vocab_index,
                         step_fn=step_fn,
                     )
+                    log.info("Turn %s: %r → cmd=%r (%d chars)", playthrough.turn_count + 1,
+                             user_input, command, len(raw_output))
                 except ValueError as e:
+                    log.warning("Translation failed for %r: %s", user_input, e)
                     await websocket.send_json({"type": "error", "message": str(e)})
+                    continue
+                except Exception:
+                    log.exception("Unexpected error running command for playthrough=%s", playthrough_id)
+                    await websocket.send_json({"type": "error", "message": "Game engine error. Try again."})
                     continue
 
                 # 2. Fetch relevant inventions
@@ -244,4 +262,6 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 })
 
         except WebSocketDisconnect:
-            pass
+            log.info("WebSocket disconnected: playthrough=%s", playthrough_id)
+        except Exception:
+            log.exception("Unhandled error in WebSocket loop: playthrough=%s", playthrough_id)

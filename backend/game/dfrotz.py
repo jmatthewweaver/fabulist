@@ -5,13 +5,15 @@ InfodumpExtractor: runs infodump (ztools) to extract Z-machine world data.
 run_one_turn(): stateless helper — start → restore → command → save → stop.
 """
 import asyncio
-import os
+import logging
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 
 from .adapter import GameEngineAdapter, WorldExtractor, StaticWorldData, StepResult
+
+log = logging.getLogger(__name__)
 
 # Patterns that indicate the game rejected the command
 _REJECTION_PATTERNS = re.compile(
@@ -34,16 +36,18 @@ class DfrotzAdapter(GameEngineAdapter):
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def start(self, game_path: str, session_id: str) -> None:
+        log.debug("Starting dfrotz: %s %s", self._dfrotz_path, game_path)
         proc = await asyncio.create_subprocess_exec(
             self._dfrotz_path, "-p", "-m", game_path,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
         self._processes[session_id] = proc
         self._locks[session_id] = asyncio.Lock()
         # Consume the opening banner
         await self._read_until_prompt(proc)
+        log.debug("dfrotz ready (pid=%s)", proc.pid)
 
     async def step(self, session_id: str, command: str) -> StepResult:
         proc = self._processes[session_id]
@@ -107,15 +111,24 @@ async def run_one_turn(
     Stateless per-turn execution: start → restore (if save_bytes) → command → save → stop.
     Returns (StepResult, new_save_bytes).
     """
+    log.info("run_one_turn: cmd=%r save=%s bytes", command, len(save_bytes) if save_bytes else 0)
     adapter = DfrotzAdapter(dfrotz_path=dfrotz_path)
     sid = "_turn"
-    await adapter.start(game_path, sid)
+    try:
+        await adapter.start(game_path, sid)
+    except FileNotFoundError:
+        raise RuntimeError(f"dfrotz not found at {dfrotz_path!r} — is it installed?")
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"dfrotz timed out starting {game_path!r} — is the game file valid?")
     try:
         if save_bytes is not None:
             await adapter.restore(sid, save_bytes)
         result = await adapter.step(sid, command)
+        log.info("run_one_turn: got %d chars, rejected=%s", len(result.raw_text), result.rejected)
         new_save = await adapter.save(sid)
         return result, new_save
+    except asyncio.TimeoutError:
+        raise RuntimeError("dfrotz timed out waiting for game response")
     finally:
         await adapter.stop(sid)
 
