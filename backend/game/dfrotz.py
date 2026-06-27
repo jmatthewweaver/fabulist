@@ -1,25 +1,19 @@
 """
-DfrotzAdapter: runs dfrotz as a subprocess via a pty so it behaves interactively.
-InfodumpExtractor: runs infodump (ztools) to extract Z-machine world data.
+dfrotz integration via piped subprocess.
 
-run_one_turn(): stateless helper — start → restore → command → save → stop.
-
-Why pty: when dfrotz's stdin/stdout are pipes, isatty() returns False and libc
-may buffer stdout. Using a pty makes dfrotz think it's attached to a terminal,
-ensuring line-buffered output and correct interactive save/restore prompts.
+All commands (restore, command, save, quit) are written to stdin at once.
+dfrotz exits when stdin closes — no interactive I/O synchronization needed.
+This matches the technique confirmed working in the diagnostic:
+  printf 'look\\nsave\\n/tmp/x.qzl\\n' | dfrotz -p -m game.z3
 """
 import asyncio
-import fcntl
 import logging
-import os
-import pty
 import re
 import subprocess
 import tempfile
-import termios
 from pathlib import Path
 
-from .adapter import GameEngineAdapter, WorldExtractor, StaticWorldData, StepResult
+from .adapter import WorldExtractor, StaticWorldData, StepResult
 
 log = logging.getLogger(__name__)
 
@@ -34,127 +28,25 @@ _REJECTION_PATTERNS = re.compile(
 )
 
 
-class DfrotzAdapter(GameEngineAdapter):
-    def __init__(self, dfrotz_path: str = "dfrotz"):
-        self._dfrotz_path = dfrotz_path
-        self._processes: dict[str, asyncio.subprocess.Process] = {}
-        self._master_fds: dict[str, int] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+def _run_dfrotz_sync(game_path: str, stdin_text: str, dfrotz_path: str) -> str:
+    """Synchronous dfrotz invocation; call via run_in_executor."""
+    result = subprocess.run(
+        [dfrotz_path, "-p", "-m", game_path],
+        input=stdin_text.encode(),
+        capture_output=True,
+        timeout=30,
+    )
+    return result.stdout.decode("latin-1", errors="replace")
 
-    async def start(self, game_path: str, session_id: str) -> None:
-        master_fd, slave_fd = pty.openpty()
 
-        # Disable echo on slave so our written commands don't appear in output
-        attrs = termios.tcgetattr(slave_fd)
-        attrs[3] &= ~termios.ECHO
-        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
-
-        # Non-blocking master so os.read() never blocks in the event loop callback
-        fl = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-        fcntl.fcntl(master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-
-        log.debug("Starting dfrotz via pty: %s %s", self._dfrotz_path, game_path)
-        proc = await asyncio.create_subprocess_exec(
-            self._dfrotz_path, "-p", "-m", game_path,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        os.close(slave_fd)
-
-        self._processes[session_id] = proc
-        self._master_fds[session_id] = master_fd
-        self._locks[session_id] = asyncio.Lock()
-
-        await self._read_until_prompt(master_fd)
-        log.debug("dfrotz ready (pid=%s)", proc.pid)
-
-    async def _read_chunk(self, fd: int, timeout: float = 10.0) -> bytes:
-        """Read up to 256 bytes from fd, waiting asynchronously."""
-        loop = asyncio.get_event_loop()
-        fut: asyncio.Future[bytes] = loop.create_future()
-
-        def on_readable():
-            try:
-                data = os.read(fd, 256)
-            except BlockingIOError:
-                return  # spurious wakeup; leave reader registered
-            except OSError as exc:
-                loop.remove_reader(fd)
-                if not fut.done():
-                    fut.set_exception(exc)
-                return
-            loop.remove_reader(fd)
-            if not fut.done():
-                fut.set_result(data)
-
-        loop.add_reader(fd, on_readable)
-        try:
-            return await asyncio.wait_for(fut, timeout=timeout)
-        except BaseException:
-            loop.remove_reader(fd)
-            raise
-
-    async def _read_until_prompt(self, fd: int) -> str:
-        """Read from the pty master until a bare '>' prompt appears."""
-        buf = bytearray()
-        while True:
-            chunk = await self._read_chunk(fd)
-            buf.extend(chunk)
-            # Pty ONLCR converts \n→\r\n; normalise before checking
-            clean = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-            if clean.rstrip().endswith(b">"):
-                break
-        text = buf.decode("latin-1", errors="replace")
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        return re.sub(r"\s*>\s*$", "", text)
-
-    async def step(self, session_id: str, command: str) -> StepResult:
-        fd = self._master_fds[session_id]
-        async with self._locks[session_id]:
-            os.write(fd, f"{command}\n".encode())
-            raw = await self._read_until_prompt(fd)
-        text = raw.strip()
-        rejected = bool(_REJECTION_PATTERNS.search(text))
-        return StepResult(raw_text=text, rejected=rejected)
-
-    async def save(self, session_id: str) -> bytes:
-        with tempfile.NamedTemporaryFile(suffix=".qzl", delete=False) as f:
-            save_path = f.name
-        try:
-            await self.step(session_id, f"save\n{save_path}")
-            return Path(save_path).read_bytes()
-        finally:
-            Path(save_path).unlink(missing_ok=True)
-
-    async def restore(self, session_id: str, save_bytes: bytes) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".qzl", delete=False) as f:
-            f.write(save_bytes)
-            save_path = f.name
-        try:
-            await self.step(session_id, f"restore\n{save_path}")
-        finally:
-            Path(save_path).unlink(missing_ok=True)
-
-    async def stop(self, session_id: str) -> None:
-        proc = self._processes.pop(session_id, None)
-        fd = self._master_fds.pop(session_id, None)
-        self._locks.pop(session_id, None)
-        if fd is not None:
-            try:
-                os.write(fd, b"quit\ny\n")
-            except OSError:
-                pass
-        if proc:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except Exception:
-                proc.kill()
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+def _extract_command_output(stdout: str, has_restore: bool) -> str:
+    """
+    dfrotz output is delimited by '\\n>' prompt markers.
+    Layout:  banner \\n> [restore_ok \\n>] command_output \\n> save_ok \\n> quit_prompt
+    """
+    parts = stdout.split("\n>")
+    idx = 2 if has_restore else 1
+    return parts[idx].strip() if idx < len(parts) else ""
 
 
 async def run_one_turn(
@@ -165,32 +57,67 @@ async def run_one_turn(
     persist: bool = True,
 ) -> tuple[StepResult, bytes | None]:
     """
-    Stateless per-turn execution: start → restore (if save_bytes) → command → save → stop.
-
-    persist=False skips the save step; use for the opening 'look' where the initial
-    game state is always reproducible and saving is unnecessary.
+    Stateless per-turn execution.  persist=False skips the save step (used for
+    the opening 'look' where the initial game state is always reproducible).
     """
     log.info("run_one_turn: cmd=%r save=%s bytes persist=%s",
              command, len(save_bytes) if save_bytes else 0, persist)
-    adapter = DfrotzAdapter(dfrotz_path=dfrotz_path)
-    sid = "_turn"
+
+    restore_path: str | None = None
+    save_path: str | None = None
     try:
-        await adapter.start(game_path, sid)
-    except FileNotFoundError:
-        raise RuntimeError(f"dfrotz not found at {dfrotz_path!r} — is it installed?")
-    except asyncio.TimeoutError:
-        raise RuntimeError(f"dfrotz timed out starting {game_path!r} — is the game file valid?")
-    try:
+        lines: list[str] = []
+
         if save_bytes is not None:
-            await adapter.restore(sid, save_bytes)
-        result = await adapter.step(sid, command)
-        log.info("run_one_turn: got %d chars, rejected=%s", len(result.raw_text), result.rejected)
-        new_save = await adapter.save(sid) if persist else None
+            tf = tempfile.NamedTemporaryFile(suffix=".qzl", delete=False)
+            tf.write(save_bytes)
+            tf.close()
+            restore_path = tf.name
+            lines.append(f"restore\n{restore_path}")
+
+        lines.append(command)
+
+        if persist:
+            tf = tempfile.NamedTemporaryFile(suffix=".qzl", delete=False)
+            tf.close()
+            save_path = tf.name
+            lines.append(f"save\n{save_path}")
+
+        lines.append("quit\ny")
+
+        stdin_text = "\n".join(lines) + "\n"
+        loop = asyncio.get_event_loop()
+        try:
+            stdout = await loop.run_in_executor(
+                None,
+                lambda: _run_dfrotz_sync(game_path, stdin_text, dfrotz_path),
+            )
+        except FileNotFoundError:
+            raise RuntimeError(f"dfrotz not found at {dfrotz_path!r} — is it installed?")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("dfrotz timed out — check game file path")
+
+        raw_text = _extract_command_output(stdout, has_restore=save_bytes is not None)
+        log.info("run_one_turn: got %d chars", len(raw_text))
+        rejected = bool(_REJECTION_PATTERNS.search(raw_text))
+        result = StepResult(raw_text=raw_text, rejected=rejected)
+
+        new_save: bytes | None = None
+        if persist and save_path:
+            p = Path(save_path)
+            if p.exists() and p.stat().st_size > 0:
+                new_save = p.read_bytes()
+                log.info("run_one_turn: saved %d bytes", len(new_save))
+            else:
+                log.warning("run_one_turn: dfrotz did not create save file")
+
         return result, new_save
-    except asyncio.TimeoutError:
-        raise RuntimeError("dfrotz timed out waiting for game response")
+
     finally:
-        await adapter.stop(sid)
+        if restore_path:
+            Path(restore_path).unlink(missing_ok=True)
+        if save_path:
+            Path(save_path).unlink(missing_ok=True)
 
 
 class InfodumpExtractor(WorldExtractor):
@@ -215,8 +142,6 @@ class InfodumpExtractor(WorldExtractor):
             raw_dump=raw,
         )
 
-
-# --- infodump output parsers ---
 
 def _parse_rooms(dump: str) -> list[dict]:
     rooms = []
