@@ -5,7 +5,8 @@ import json
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Cookie, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -15,17 +16,35 @@ from ..game.session_store import session_store, ActiveSession
 from ..ai.context_manager import ContextManager
 from ..config import settings
 from ..deps import get_db
+from .auth import decode_jwt
+
+
+def _get_user_id(request: Request) -> str:
+    token = request.cookies.get("auth_token")
+    if not token:
+        raise HTTPException(401, "Not authenticated")
+    try:
+        return decode_jwt(token)["sub"]
+    except Exception:
+        raise HTTPException(401, "Invalid token")
+
+
+class StartSessionRequest(BaseModel):
+    game_id: str
+    style_id: str | None = None
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
 @router.post("")
 async def create_session(
-    game_id: str,
-    style_id: str,
-    user_id: str,
+    body: StartSessionRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    game_id = body.game_id
+    style_id = body.style_id or ""
+    user_id = _get_user_id(request)
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "Game not found")

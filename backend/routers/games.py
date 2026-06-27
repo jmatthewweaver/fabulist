@@ -6,7 +6,7 @@ import hashlib
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -15,6 +15,7 @@ from ..game.dfrotz import DfrotzAdapter, InfodumpExtractor
 from ..ai.world_bible import generate_world_bible, build_vocab_index
 from ..config import settings
 from ..deps import get_db
+from .auth import decode_jwt
 
 router = APIRouter(prefix="/api/games", tags=["games"])
 
@@ -36,7 +37,9 @@ async def list_games(db: AsyncSession = Depends(get_db)):  # dep injected in mai
 
 
 @router.get("/{game_id}")
-async def get_game(game_id: str, user_id: str, db: AsyncSession = Depends(get_db)):
+async def get_game(game_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    token = request.cookies.get("auth_token")
+    user_id = decode_jwt(token)["sub"] if token else None
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "Game not found")
