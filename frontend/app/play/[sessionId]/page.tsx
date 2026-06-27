@@ -73,7 +73,7 @@ export default function PlayPage() {
           setCurrentRoom(msg.room);
           break;
         case "image_ready":
-          setImageUrl(msg.url);
+          setImageUrl(`${process.env.NEXT_PUBLIC_API_URL}${msg.url}`);
           setImageLoading(false);
           break;
         case "error":

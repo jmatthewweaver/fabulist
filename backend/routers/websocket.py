@@ -80,10 +80,22 @@ async def play(websocket: WebSocket, session_id: str):
         # Send opening game state on first connect
         if (db_session.turn_count or 0) == 0:
             opening = await active.adapter.step(session_id, "look")
-            bundle = context.build_bundle(current_room="", current_inventory=[], relevant_inventions=[])
+            # dfrotz puts the room name on the first line of output
+            opening_room = opening.raw_text.strip().split("\n")[0].strip()
+            if opening_room:
+                last_room = opening_room
+                db_session.current_room = opening_room
+                await db.commit()
+            bundle = context.build_bundle(current_room=last_room, current_inventory=[], relevant_inventions=[])
             async for chunk in enrich_stream(opening.raw_text, bundle):
                 await websocket.send_json({"type": "narrative_chunk", "text": chunk})
             await websocket.send_json({"type": "narrative_done"})
+            await websocket.send_json({"type": "game_state", "room": last_room, "inventory": [], "turn": 0})
+            asyncio.create_task(_generate_and_push(
+                websocket,
+                {"suggest": True, "type": "room_wide", "subject": last_room, "prompt_hint": f"{last_room} interior, opening scene"},
+                last_room, session_id, style_prefix,
+            ))
 
         try:
             while True:
