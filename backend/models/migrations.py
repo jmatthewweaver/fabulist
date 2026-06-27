@@ -1,6 +1,6 @@
 """
 DDL that SQLAlchemy can't express natively — run once after create_all().
-Idempotent: uses IF NOT EXISTS where possible.
+Idempotent: uses IF NOT EXISTS / DO blocks throughout.
 """
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy import text
@@ -10,8 +10,24 @@ _DDL = [
     "CREATE EXTENSION IF NOT EXISTS vector",
     "CREATE EXTENSION IF NOT EXISTS pg_textsearch",
 
+    # Rename inventions.session_id → playthrough_id if still on old schema
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'inventions' AND column_name = 'session_id'
+        ) THEN
+            ALTER TABLE inventions RENAME COLUMN session_id TO playthrough_id;
+            ALTER TABLE inventions DROP CONSTRAINT IF EXISTS uq_invention_session_object;
+            ALTER TABLE inventions ADD CONSTRAINT uq_invention_playthrough_object
+                UNIQUE (playthrough_id, object_key);
+        END IF;
+    END
+    $$
+    """,
+
     # Make full_text a generated column: object_key (spaces restored) + canonical_text.
-    # ALTER COLUMN is idempotent-ish — wrapped in a DO block to skip if already generated.
     """
     DO $$
     BEGIN

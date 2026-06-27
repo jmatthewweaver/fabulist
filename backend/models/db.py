@@ -15,12 +15,12 @@ class Base(AsyncAttrs, DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(String, primary_key=True)           # Google sub claim
+    id = Column(String, primary_key=True)
     email = Column(String, unique=True, nullable=False)
     display_name = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    sessions = relationship("Session", back_populates="user")
+    playthroughs = relationship("Playthrough", back_populates="user")
 
 
 class Game(Base):
@@ -32,12 +32,12 @@ class Game(Base):
     format = Column(String, nullable=False)         # "zmachine", "glulx", etc.
     description = Column(Text)
     default_style_id = Column(String, ForeignKey("styles.id"))
-    world_bible = Column(JSONB)                     # structured dict from ingestion
-    vocab_index = Column(JSONB)                     # noun → object_name map
+    world_bible = Column(JSONB)
+    vocab_index = Column(JSONB)
     icon_image_url = Column(String)
     ingested_at = Column(DateTime)
 
-    sessions = relationship("Session", back_populates="game")
+    playthroughs = relationship("Playthrough", back_populates="game")
     default_style = relationship("Style", foreign_keys=[default_style_id])
 
 
@@ -53,61 +53,46 @@ class Style(Base):
     seed_image_url = Column(String)
 
 
-class Session(Base):
-    """One active playthrough per user per game."""
-    __tablename__ = "sessions"
+class Playthrough(Base):
+    """
+    One persistent playthrough per user per game. The URL refers to this.
+    engine_save holds the current Z-machine state; updated after every turn.
+    """
+    __tablename__ = "playthroughs"
     id = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     game_id = Column(String, ForeignKey("games.id"), nullable=False)
     style_id = Column(String, ForeignKey("styles.id"), nullable=True)
+    engine_save = Column(BYTEA, nullable=True)        # None until first turn completes
+    context_json = Column(JSONB)
     current_room = Column(String)
     turn_count = Column(Integer, default=0)
-    context_json = Column(JSONB)                    # serialized ContextManager state
-    started_at = Column(DateTime, default=datetime.utcnow)
-    last_active = Column(DateTime, default=datetime.utcnow)
-    ended_at = Column(DateTime)
-
-    user = relationship("User", back_populates="sessions")
-    game = relationship("Game", back_populates="sessions")
-    style = relationship("Style")
-    saves = relationship("Save", back_populates="session", order_by="Save.created_at.desc()")
-    inventions = relationship("Invention", back_populates="session")
-
-
-class Save(Base):
-    """Named save snapshot within a session."""
-    __tablename__ = "saves"
-    id = Column(String, primary_key=True)
-    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
-    name = Column(String, nullable=False)
-    engine_save = Column(BYTEA, nullable=False)
-    context_json = Column(JSONB, nullable=False)
-    inventions_json = Column(JSONB, nullable=False)
-    turn_count = Column(Integer)
-    room_name = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+    last_active = Column(DateTime, default=datetime.utcnow)
 
-    session = relationship("Session", back_populates="saves")
+    user = relationship("User", back_populates="playthroughs")
+    game = relationship("Game", back_populates="playthroughs")
+    style = relationship("Style")
+    inventions = relationship("Invention", back_populates="playthrough")
 
 
 class Invention(Base):
-    """Invented detail for a named object, scoped to a session. Immutable once written."""
+    """Invented detail for a named object, scoped to a playthrough. Immutable once written."""
     __tablename__ = "inventions"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
-    object_key = Column(String, nullable=False)     # normalized lowercase, e.g. "wooden_cup"
+    playthrough_id = Column(String, ForeignKey("playthroughs.id"), nullable=False)
+    object_key = Column(String, nullable=False)
     canonical_text = Column(Text, nullable=False)
     # full_text is a generated column (set via DDL in migrations.py) used for BM25 indexing
     full_text = Column(Text)
-    embedding = Column(Vector(1024))                # pgvector: semantic similarity search
+    embedding = Column(Vector(1024))
     source_turn = Column(Integer)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    session = relationship("Session", back_populates="inventions")
+    playthrough = relationship("Playthrough", back_populates="inventions")
 
     __table_args__ = (
-        UniqueConstraint("session_id", "object_key", name="uq_invention_session_object"),
-        # BM25 and HNSW indexes created via raw DDL in migrations.py
+        UniqueConstraint("playthrough_id", "object_key", name="uq_invention_playthrough_object"),
         Index("ix_inventions_embedding", "embedding", postgresql_using="hnsw",
               postgresql_with={"m": "16", "ef_construction": "64"},
               postgresql_ops={"embedding": "vector_cosine_ops"}),

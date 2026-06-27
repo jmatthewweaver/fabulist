@@ -36,6 +36,7 @@ app.add_middleware(
 
 app.mount("/images", StaticFiles(directory=str(settings.images_dir)), name="images")
 
+
 async def _seed_styles():
     from .models.db import Style
     from .deps import AsyncSessionLocal
@@ -57,12 +58,12 @@ async def _seed_styles():
 
 from .routers.auth import router as auth_router
 from .routers.games import router as games_router
-from .routers.sessions import router as sessions_router
+from .routers.playthroughs import router as playthroughs_router
 from .routers.websocket import router as ws_router
 
 app.include_router(auth_router)
 app.include_router(games_router)
-app.include_router(sessions_router)
+app.include_router(playthroughs_router)
 app.include_router(ws_router)
 
 

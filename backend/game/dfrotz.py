@@ -2,9 +2,10 @@
 DfrotzAdapter: runs dfrotz as a subprocess, communicates via stdin/stdout.
 InfodumpExtractor: runs infodump (ztools) to extract Z-machine world data.
 
-Requires dfrotz and infodump to be on PATH (or configure paths in settings).
+run_one_turn(): stateless helper — start → restore → command → save → stop.
 """
 import asyncio
+import os
 import re
 import subprocess
 import tempfile
@@ -23,7 +24,6 @@ _REJECTION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# dfrotz outputs a prompt character; we read until we see it
 _PROMPT = b">"
 
 
@@ -42,7 +42,7 @@ class DfrotzAdapter(GameEngineAdapter):
         )
         self._processes[session_id] = proc
         self._locks[session_id] = asyncio.Lock()
-        # Consume the opening text
+        # Consume the opening banner
         await self._read_until_prompt(proc)
 
     async def step(self, session_id: str, command: str) -> StepResult:
@@ -58,14 +58,20 @@ class DfrotzAdapter(GameEngineAdapter):
     async def save(self, session_id: str) -> bytes:
         with tempfile.NamedTemporaryFile(suffix=".qzl", delete=False) as f:
             save_path = f.name
-        result = await self.step(session_id, f"save\n{save_path}")
-        return Path(save_path).read_bytes()
+        try:
+            await self.step(session_id, f"save\n{save_path}")
+            return Path(save_path).read_bytes()
+        finally:
+            Path(save_path).unlink(missing_ok=True)
 
     async def restore(self, session_id: str, save_bytes: bytes) -> None:
         with tempfile.NamedTemporaryFile(suffix=".qzl", delete=False) as f:
             f.write(save_bytes)
             save_path = f.name
-        await self.step(session_id, f"restore\n{save_path}")
+        try:
+            await self.step(session_id, f"restore\n{save_path}")
+        finally:
+            Path(save_path).unlink(missing_ok=True)
 
     async def stop(self, session_id: str) -> None:
         proc = self._processes.pop(session_id, None)
@@ -85,12 +91,33 @@ class DfrotzAdapter(GameEngineAdapter):
             if not chunk:
                 break
             buf.extend(chunk)
-            # dfrotz prompt is "> " at start of a line
             if buf.rstrip().endswith(b">"):
                 break
         text = buf.decode("latin-1", errors="replace")
-        # Strip the trailing prompt
         return re.sub(r"\s*>\s*$", "", text)
+
+
+async def run_one_turn(
+    game_path: str,
+    command: str,
+    save_bytes: bytes | None,
+    dfrotz_path: str = "dfrotz",
+) -> tuple[StepResult, bytes]:
+    """
+    Stateless per-turn execution: start → restore (if save_bytes) → command → save → stop.
+    Returns (StepResult, new_save_bytes).
+    """
+    adapter = DfrotzAdapter(dfrotz_path=dfrotz_path)
+    sid = "_turn"
+    await adapter.start(game_path, sid)
+    try:
+        if save_bytes is not None:
+            await adapter.restore(sid, save_bytes)
+        result = await adapter.step(sid, command)
+        new_save = await adapter.save(sid)
+        return result, new_save
+    finally:
+        await adapter.stop(sid)
 
 
 class InfodumpExtractor(WorldExtractor):
@@ -116,10 +143,9 @@ class InfodumpExtractor(WorldExtractor):
         )
 
 
-# --- infodump output parsers (rough; infodump format varies by Z-machine version) ---
+# --- infodump output parsers ---
 
 def _parse_rooms(dump: str) -> list[dict]:
-    # Objects with the "Room" attribute are rooms in Z-machine convention
     rooms = []
     for block in re.split(r"\n(?=Object\s+\d+)", dump):
         if "Room" in block or "Outdoors" in block:

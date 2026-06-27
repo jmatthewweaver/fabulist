@@ -1,5 +1,5 @@
 """
-Session-scoped invention ledger.
+Playthrough-scoped invention ledger.
 Immutable: once an object description is written, it never changes.
 
 Two search strategies:
@@ -39,14 +39,14 @@ def _embed(text_to_embed: str) -> list[float]:
 
 # --- Core read/write ---
 
-async def lookup(db: AsyncSession, session_id: str, object_names: list[str]) -> list[dict]:
+async def lookup(db: AsyncSession, playthrough_id: str, object_names: list[str]) -> list[dict]:
     """Exact key match for known objects currently in scope."""
     if not object_names:
         return []
     keys = [n.lower().replace(" ", "_") for n in object_names]
     result = await db.execute(
         select(Invention.object_key, Invention.canonical_text).where(
-            Invention.session_id == session_id,
+            Invention.playthrough_id == playthrough_id,
             Invention.object_key.in_(keys),
         )
     )
@@ -54,19 +54,22 @@ async def lookup(db: AsyncSession, session_id: str, object_names: list[str]) -> 
 
 
 async def write(
-    db: AsyncSession, session_id: str, object_key: str, canonical_text: str, turn: int
+    db: AsyncSession, playthrough_id: str, object_key: str, canonical_text: str, turn: int
 ) -> bool:
     """Write a new invention. No-op if one already exists (immutability). Returns True if written."""
     key = object_key.lower().replace(" ", "_")
     existing = await db.execute(
-        select(Invention).where(Invention.session_id == session_id, Invention.object_key == key)
+        select(Invention).where(
+            Invention.playthrough_id == playthrough_id,
+            Invention.object_key == key,
+        )
     )
     if existing.scalar_one_or_none():
         return False
 
     embedding = _embed(f"{key.replace('_', ' ')} — {canonical_text}")
     inv = Invention(
-        session_id=session_id,
+        playthrough_id=playthrough_id,
         object_key=key,
         canonical_text=canonical_text,
         embedding=embedding,
@@ -80,20 +83,16 @@ async def write(
 
 # --- BM25 search (pg_textsearch) ---
 
-async def bm25_search(db: AsyncSession, session_id: str, query: str, limit: int = 8) -> list[dict]:
-    """
-    Keyword relevance search via BM25.
-    Uses the pg_textsearch <@> operator against the inventions_bm25_idx index.
-    """
+async def bm25_search(db: AsyncSession, playthrough_id: str, query: str, limit: int = 8) -> list[dict]:
     result = await db.execute(
         text(
             "SELECT object_key, canonical_text "
             "FROM inventions "
-            "WHERE session_id = :sid "
+            "WHERE playthrough_id = :pid "
             "ORDER BY full_text <@> to_bm25query(:query, 'inventions_bm25_idx') "
             "LIMIT :limit"
         ),
-        {"sid": session_id, "query": query, "limit": limit},
+        {"pid": playthrough_id, "query": query, "limit": limit},
     )
     return [{"object_key": r.object_key, "canonical_text": r.canonical_text} for r in result]
 
@@ -101,14 +100,9 @@ async def bm25_search(db: AsyncSession, session_id: str, query: str, limit: int 
 # --- Vector similarity search (pgvector) ---
 
 async def semantic_context(
-    db: AsyncSession, session_id: str, scene_description: str, limit: int = 5
+    db: AsyncSession, playthrough_id: str, scene_description: str, limit: int = 5
 ) -> list[dict]:
-    """
-    Find prior inventions most semantically relevant to the current scene.
-    Used to inject helpful context into the enrichment prompt even for objects
-    not explicitly in scope — e.g., a fireplace described 10 rooms ago surfacing
-    when the player enters a warm, smoky corridor.
-    """
+    """Find prior inventions most semantically relevant to the current scene."""
     query_embedding = _embed(scene_description)
     emb_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
     result = await db.execute(
@@ -116,16 +110,16 @@ async def semantic_context(
             "SELECT object_key, canonical_text, "
             f"1 - (embedding <=> '{emb_str}'::vector) AS similarity "
             "FROM inventions "
-            "WHERE session_id = :sid AND embedding IS NOT NULL "
+            "WHERE playthrough_id = :pid AND embedding IS NOT NULL "
             f"ORDER BY embedding <=> '{emb_str}'::vector "
             "LIMIT :limit"
         ),
-        {"sid": session_id, "limit": limit},
+        {"pid": playthrough_id, "limit": limit},
     )
     return [
         {"object_key": r.object_key, "canonical_text": r.canonical_text, "similarity": r.similarity}
         for r in result
-        if r.similarity > 0.75  # only inject genuinely relevant results
+        if r.similarity > 0.75
     ]
 
 
@@ -133,7 +127,7 @@ async def semantic_context(
 
 async def extract_and_store(
     db: AsyncSession,
-    session_id: str,
+    playthrough_id: str,
     narrative: str,
     turn: int,
 ) -> list[str]:
@@ -158,26 +152,9 @@ async def extract_and_store(
         key = item.get("object_key", "").strip()
         text_val = item.get("canonical_text", "").strip()
         if key and text_val:
-            stored = await write(db, session_id, key, text_val, turn)
+            stored = await write(db, playthrough_id, key, text_val, turn)
             if stored:
                 written.append(key)
     if written:
         await db.commit()
     return written
-
-
-# --- Save/restore snapshots ---
-
-async def export_snapshot(db: AsyncSession, session_id: str) -> list[dict]:
-    result = await db.execute(
-        select(Invention.object_key, Invention.canonical_text, Invention.source_turn).where(
-            Invention.session_id == session_id
-        )
-    )
-    return [dict(r._mapping) for r in result]
-
-
-async def import_snapshot(db: AsyncSession, session_id: str, snapshot: list[dict]) -> None:
-    for item in snapshot:
-        await write(db, session_id, item["object_key"], item["canonical_text"], item["source_turn"])
-    await db.commit()

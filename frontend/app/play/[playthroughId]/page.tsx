@@ -1,7 +1,7 @@
 // Screen 3: Game Session — the main play interface
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams } from "next/navigation";
 import { SceneImage } from "../../../components/SceneImage";
 import { NarrativePanel } from "../../../components/NarrativePanel";
 import { InputBar } from "../../../components/InputBar";
@@ -14,9 +14,7 @@ interface Turn {
 }
 
 export default function PlayPage() {
-  const { sessionId } = useParams<{ sessionId: string }>();
-  const searchParams = useSearchParams();
-  const restoreSaveId = searchParams.get("restore");
+  const { playthroughId } = useParams<{ playthroughId: string }>();
 
   const wsRef = useRef<WebSocket | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -30,23 +28,13 @@ export default function PlayPage() {
   const pendingNarrativeRef = useRef<string[]>([]);
 
   useEffect(() => {
-    // Restore save if needed, then connect WebSocket
-    const init = async () => {
-      if (restoreSaveId) {
-        await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL}/api/sessions/${sessionId}/restore/${restoreSaveId}`,
-          { method: "POST", credentials: "include" }
-        );
-      }
-      connectWs();
-    };
-    init();
+    connectWs();
     return () => wsRef.current?.close();
-  }, [sessionId]);
+  }, [playthroughId]);
 
   const connectWs = () => {
     const wsUrl = process.env.NEXT_PUBLIC_API_URL!.replace(/^http/, "ws");
-    const ws = new WebSocket(`${wsUrl}/api/sessions/${sessionId}/play`);
+    const ws = new WebSocket(`${wsUrl}/api/playthroughs/${playthroughId}/play`);
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
@@ -82,6 +70,7 @@ export default function PlayPage() {
             { id: prev.length, userInput: "", narrative: `[${msg.message}]`, room: currentRoom },
           ]);
           setIsStreaming(false);
+          setIsConnecting(false);
           break;
       }
     };
@@ -109,10 +98,7 @@ export default function PlayPage() {
 
   return (
     <div className="flex flex-col h-[100dvh] max-w-lg mx-auto">
-      {/* Hero image */}
       <SceneImage url={imageUrl} loading={imageLoading} roomName={currentRoom} onRequestImage={requestImage} />
-
-      {/* Narrative */}
       <NarrativePanel
         text={narrativeToShow}
         isStreaming={isStreaming}
@@ -122,8 +108,6 @@ export default function PlayPage() {
         onPrev={() => setCurrentTurn((i) => Math.max(0, i - 1))}
         onNext={() => setCurrentTurn((i) => Math.min(turns.length - 1, i + 1))}
       />
-
-      {/* Input */}
       <InputBar onSubmit={sendCommand} disabled={isStreaming || isConnecting} />
     </div>
   );

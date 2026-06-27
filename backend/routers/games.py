@@ -1,16 +1,15 @@
 """
-Game library endpoints: list games, get game details + user's saves.
+Game library endpoints: list games, get game details + user's playthroughs.
 Also: game ingestion trigger.
 """
 import hashlib
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from ..models.db import Game, Save, Session, Style
+from ..models.db import Game, Playthrough, Style
 from ..game.dfrotz import DfrotzAdapter, InfodumpExtractor
 from ..ai.world_bible import generate_world_bible, build_vocab_index
 from ..config import settings
@@ -21,7 +20,7 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 
 
 @router.get("")
-async def list_games(db: AsyncSession = Depends(get_db)):  # dep injected in main
+async def list_games(db: AsyncSession = Depends(get_db)):
     games = await db.execute(select(Game).order_by(Game.title))
     return [
         {
@@ -44,31 +43,21 @@ async def get_game(game_id: str, request: Request, db: AsyncSession = Depends(ge
     if not game:
         raise HTTPException(404, "Game not found")
 
-    # User's saves for this game, most recent first
-    sessions_q = await db.execute(
-        select(Session).where(Session.user_id == user_id, Session.game_id == game_id)
-    )
-    sessions = sessions_q.scalars().all()
-    session_ids = [s.id for s in sessions]
-
-    saves = []
-    if session_ids:
-        saves_q = await db.execute(
-            select(Save)
-            .where(Save.session_id.in_(session_ids))
-            .order_by(Save.created_at.desc())
-            .limit(20)
+    playthroughs = []
+    if user_id:
+        q = await db.execute(
+            select(Playthrough)
+            .where(Playthrough.user_id == user_id, Playthrough.game_id == game_id)
+            .order_by(Playthrough.last_active.desc())
         )
-        saves = [
+        playthroughs = [
             {
-                "id": s.id,
-                "session_id": s.session_id,
-                "name": s.name,
-                "room_name": s.room_name,
-                "turn_count": s.turn_count,
-                "created_at": s.created_at.isoformat(),
+                "id": p.id,
+                "current_room": p.current_room,
+                "turn_count": p.turn_count,
+                "last_active": p.last_active.isoformat() if p.last_active else None,
             }
-            for s in saves_q.scalars()
+            for p in q.scalars()
         ]
 
     styles = await db.execute(select(Style))
@@ -78,7 +67,7 @@ async def get_game(game_id: str, request: Request, db: AsyncSession = Depends(ge
         "description": game.description,
         "icon_image_url": game.icon_image_url,
         "default_style_id": game.default_style_id,
-        "saves": saves,
+        "playthroughs": playthroughs,
         "available_styles": [
             {"id": s.id, "name": s.name, "description": s.description}
             for s in styles.scalars()
@@ -104,7 +93,6 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     extractor = InfodumpExtractor(infodump_path=settings.infodump_path)
     world_data = await extractor.extract(str(game_path))
 
-    # Run the game briefly to get opening text
     adapter = DfrotzAdapter(dfrotz_path=settings.dfrotz_path)
     await adapter.start(str(game_path), f"ingest_{game_id}")
     opening_result = await adapter.step(f"ingest_{game_id}", "look")

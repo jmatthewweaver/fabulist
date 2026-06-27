@@ -1,16 +1,14 @@
-// Screen 2: Game Page — description, default style, user's saves
+// Screen 2: Game Page — description, default style, user's playthroughs
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 
-interface Save {
+interface Playthrough {
   id: string;
-  session_id: string;
-  name: string;
-  room_name: string;
+  current_room: string | null;
   turn_count: number;
-  created_at: string;
+  last_active: string;
 }
 
 interface GameDetail {
@@ -19,7 +17,7 @@ interface GameDetail {
   description: string;
   icon_image_url: string | null;
   default_style_id: string;
-  saves: Save[];
+  playthroughs: Playthrough[];
   available_styles: { id: string; name: string; description: string }[];
 }
 
@@ -42,18 +40,14 @@ export default function GamePage() {
 
   const startNew = async () => {
     setStarting(true);
-    const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/sessions`, {
+    const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/playthroughs`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ game_id: gameId, style_id: selectedStyle }),
     });
-    const { session_id } = await res.json();
-    router.push(`/play/${session_id}`);
-  };
-
-  const resume = (save: Save) => {
-    router.push(`/play/${save.session_id}?restore=${save.id}`);
+    const { id } = await res.json();
+    router.push(`/play/${id}`);
   };
 
   if (!game) return <div className="flex items-center justify-center h-screen text-stone-500">Loading...</div>;
@@ -74,22 +68,24 @@ export default function GamePage() {
         </div>
       </div>
 
-      {/* Saves */}
-      {(game.saves ?? []).length > 0 && (
+      {/* Previous playthroughs */}
+      {(game.playthroughs ?? []).length > 0 && (
         <section className="mb-6">
           <h2 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-3">Continue</h2>
           <div className="grid gap-2">
-            {(game.saves ?? []).map((save) => (
+            {(game.playthroughs ?? []).map((p) => (
               <button
-                key={save.id}
-                onClick={() => resume(save)}
+                key={p.id}
+                onClick={() => router.push(`/play/${p.id}`)}
                 className="flex items-center justify-between p-3 rounded-lg bg-stone-900 hover:bg-stone-800 border border-stone-800 text-left transition-colors"
               >
                 <div>
-                  <div className="text-sm text-stone-200">{save.name}</div>
-                  <div className="text-xs text-stone-500 mt-0.5">{save.room_name} · Turn {save.turn_count}</div>
+                  <div className="text-sm text-stone-200">{p.current_room ?? "Unknown location"}</div>
+                  <div className="text-xs text-stone-500 mt-0.5">Turn {p.turn_count}</div>
                 </div>
-                <span className="text-xs text-stone-600">{new Date(save.created_at).toLocaleDateString()}</span>
+                <span className="text-xs text-stone-600">
+                  {new Date(p.last_active).toLocaleDateString()}
+                </span>
               </button>
             ))}
           </div>

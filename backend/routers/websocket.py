@@ -1,12 +1,15 @@
 """
-WebSocket game loop. One connection per active session.
+WebSocket game loop.
+
+Each command spins up a fresh dfrotz process: restore → command → save → kill.
+All durable state lives in the Playthrough DB record between turns.
 
 Message protocol (client → server):
   {"type": "command", "text": "..."}
-  {"type": "request_image"}          # explicit 📷 request, bypasses cooldown
+  {"type": "request_image"}
 
 Message protocol (server → client):
-  {"type": "narrative_chunk", "text": "..."}   # streaming
+  {"type": "narrative_chunk", "text": "..."}
   {"type": "narrative_done"}
   {"type": "game_state", "room": "...", "inventory": [...], "turn": N}
   {"type": "image_ready", "url": "...", "subject": "..."}
@@ -14,9 +17,9 @@ Message protocol (server → client):
 """
 import asyncio
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import AsyncSessionLocal
 from ..ai import invention_ledger
@@ -24,22 +27,36 @@ from ..ai.command_translator import translate
 from ..ai.context_manager import ContextManager, Turn
 from ..ai.enricher import enrich_stream, extract_image_suggestion
 from ..config import settings
-from ..models.db import Session as DbSession, Game
-from ..game.session_store import session_store
+from ..models.db import Playthrough, Game
+from ..game.dfrotz import run_one_turn
 
 router = APIRouter()
+
+
+def _extract_new_room(raw_text: str) -> str | None:
+    """
+    If raw output leads with a room title header, return it.
+    Room names are short, start with a capital, and don't end with sentence punctuation.
+    """
+    first_line = raw_text.strip().split("\n")[0].strip()
+    if (first_line
+            and len(first_line) < 60
+            and first_line[0].isupper()
+            and not first_line.endswith((".", "!", "?", ","))):
+        return first_line
+    return None
 
 
 async def _generate_and_push(
     websocket: WebSocket,
     suggestion: dict,
     current_room: str,
-    session_id: str,
+    playthrough_id: str,
     style_prefix: str,
 ):
     try:
-        from ..media.image_generator import generate_scene_image, make_cache_key, build_scene_prompt
-        cache_key = make_cache_key(session_id, current_room, [], "default")
+        from ..media.image_generator import generate_scene_image, make_cache_key
+        cache_key = make_cache_key(playthrough_id, current_room, [], "default")
         url = await generate_scene_image(
             scene_prompt=suggestion.get("prompt_hint", current_room),
             style_prefix=style_prefix,
@@ -49,52 +66,60 @@ async def _generate_and_push(
         )
         await websocket.send_json({"type": "image_ready", "url": url, "subject": suggestion.get("subject", "")})
     except Exception:
-        # Image failure is non-fatal — just don't send image_ready
         pass
 
 
-@router.websocket("/api/sessions/{session_id}/play")
-async def play(websocket: WebSocket, session_id: str):
+@router.websocket("/api/playthroughs/{playthrough_id}/play")
+async def play(websocket: WebSocket, playthrough_id: str):
     await websocket.accept()
 
     async with AsyncSessionLocal() as db:
-        active = session_store.get(session_id)
-        if not active:
-            await websocket.send_json({"type": "error", "message": "Session not running. Try resuming from a save."})
+        playthrough: Playthrough = await db.get(Playthrough, playthrough_id)
+        if not playthrough:
+            await websocket.send_json({"type": "error", "message": "Playthrough not found."})
             await websocket.close()
             return
 
-        db_session: DbSession = await db.get(DbSession, session_id)
-        game: Game = await db.get(Game, db_session.game_id)
-        context = ContextManager.from_json(db_session.context_json)
-        import json as _json
-        vocab_index: dict = game.vocab_index if isinstance(game.vocab_index, dict) else _json.loads(game.vocab_index or "{}")
-        world_bible: dict = game.world_bible if isinstance(game.world_bible, dict) else _json.loads(game.world_bible or "{}")
+        game: Game = await db.get(Game, playthrough.game_id)
+        game_path = str(settings.games_dir / game.filename)
+        context = ContextManager.from_json(playthrough.context_json)
+
+        world_bible: dict = game.world_bible if isinstance(game.world_bible, dict) else json.loads(game.world_bible or "{}")
+        vocab_index: dict = game.vocab_index if isinstance(game.vocab_index, dict) else json.loads(game.vocab_index or "{}")
         vocab_verbs: list = world_bible.get("vocab_verbs", [])
         vocab_nouns: list = world_bible.get("vocab_nouns", [])
         style_prefix: str = ""  # TODO: load from Style record
 
-        last_image_turn: int = -(settings.image_cooldown_turns)  # allow image on first turn
-        last_room: str = db_session.current_room or ""
+        last_image_turn: int = -(settings.image_cooldown_turns)
 
-        # Send opening game state on first connect
-        if (db_session.turn_count or 0) == 0:
-            opening = await active.adapter.step(session_id, "look")
-            # dfrotz puts the room name on the first line of output
-            opening_room = opening.raw_text.strip().split("\n")[0].strip()
-            if opening_room:
-                last_room = opening_room
-                db_session.current_room = opening_room
-                await db.commit()
-            bundle = context.build_bundle(current_room=last_room, current_inventory=[], relevant_inventions=[])
+        # First connect: run "look" on a fresh process with no prior save
+        if (playthrough.turn_count or 0) == 0:
+            try:
+                opening, initial_save = await run_one_turn(
+                    game_path, "look", None, settings.dfrotz_path
+                )
+            except Exception as e:
+                await websocket.send_json({"type": "error", "message": f"Failed to start game: {e}"})
+                await websocket.close()
+                return
+
+            opening_room = _extract_new_room(opening.raw_text) or ""
+            playthrough.engine_save = initial_save
+            playthrough.current_room = opening_room
+            playthrough.context_json = context.to_json()
+            playthrough.last_active = datetime.utcnow()
+            await db.commit()
+
+            bundle = context.build_bundle(current_room=opening_room, current_inventory=[], relevant_inventions=[])
             async for chunk in enrich_stream(opening.raw_text, bundle):
                 await websocket.send_json({"type": "narrative_chunk", "text": chunk})
             await websocket.send_json({"type": "narrative_done"})
-            await websocket.send_json({"type": "game_state", "room": last_room, "inventory": [], "turn": 0})
+            await websocket.send_json({"type": "game_state", "room": opening_room, "inventory": [], "turn": 0})
             asyncio.create_task(_generate_and_push(
                 websocket,
-                {"suggest": True, "type": "room_wide", "subject": last_room, "prompt_hint": f"{last_room} interior, opening scene"},
-                last_room, session_id, style_prefix,
+                {"suggest": True, "type": "room_wide", "subject": opening_room,
+                 "prompt_hint": f"{opening_room} interior, opening scene"},
+                opening_room, playthrough_id, style_prefix,
             ))
 
         try:
@@ -102,15 +127,14 @@ async def play(websocket: WebSocket, session_id: str):
                 data = await websocket.receive_json()
                 msg_type = data.get("type")
 
-                # Explicit image request — bypasses cooldown
                 if msg_type == "request_image":
-                    suggestion = {
-                        "suggest": True,
-                        "type": "room_wide",
-                        "subject": last_room,
-                        "prompt_hint": f"{last_room} interior",
-                    }
-                    asyncio.create_task(_generate_and_push(websocket, suggestion, last_room, session_id, style_prefix))
+                    room = playthrough.current_room or ""
+                    asyncio.create_task(_generate_and_push(
+                        websocket,
+                        {"suggest": True, "type": "room_wide", "subject": room,
+                         "prompt_hint": f"{room} interior"},
+                        room, playthrough_id, style_prefix,
+                    ))
                     continue
 
                 if msg_type != "command":
@@ -120,10 +144,22 @@ async def play(websocket: WebSocket, session_id: str):
                 if not user_input:
                     continue
 
-                current_room = db_session.current_room or "Unknown"
-                visible_objects: list[str] = []  # TODO: parse from last game output
+                current_room = playthrough.current_room or "Unknown"
+                visible_objects: list[str] = []
 
-                # 1. Translate user input → game command
+                # 1. Translate natural language → game command via dfrotz
+                # step_fn runs one turn; captures save bytes on success
+                latest_save = playthrough.engine_save
+
+                async def step_fn(cmd: str):
+                    nonlocal latest_save
+                    result, new_save = await run_one_turn(
+                        game_path, cmd, playthrough.engine_save, settings.dfrotz_path
+                    )
+                    if not result.rejected:
+                        latest_save = new_save
+                    return result
+
                 try:
                     command, raw_output = await translate(
                         user_input=user_input,
@@ -132,26 +168,25 @@ async def play(websocket: WebSocket, session_id: str):
                         vocab_verbs=vocab_verbs,
                         vocab_nouns=vocab_nouns,
                         vocab_index=vocab_index,
-                        step_fn=lambda cmd: active.adapter.step(session_id, cmd),
+                        step_fn=step_fn,
                     )
                 except ValueError as e:
                     await websocket.send_json({"type": "error", "message": str(e)})
                     continue
 
-                # 2. Fetch relevant inventions (exact + semantic)
-                exact_inventions = await invention_ledger.lookup(db, session_id, visible_objects)
+                # 2. Fetch relevant inventions
+                exact_inventions = await invention_ledger.lookup(db, playthrough_id, visible_objects)
                 scene_desc = f"{current_room}. {raw_output[:300]}"
-                semantic_inventions = await invention_ledger.semantic_context(db, session_id, scene_desc)
+                semantic_inventions = await invention_ledger.semantic_context(db, playthrough_id, scene_desc)
                 seen = {i["object_key"] for i in exact_inventions}
                 inventions = exact_inventions + [i for i in semantic_inventions if i["object_key"] not in seen]
 
-                # 3. Build context bundle and stream enriched narrative
+                # 3. Stream enriched narrative
                 bundle = context.build_bundle(
                     current_room=current_room,
                     current_inventory=[],
                     relevant_inventions=inventions,
                 )
-
                 full_narrative: list[str] = []
                 async for chunk in enrich_stream(raw_output, bundle):
                     await websocket.send_json({"type": "narrative_chunk", "text": chunk})
@@ -159,11 +194,17 @@ async def play(websocket: WebSocket, session_id: str):
                 await websocket.send_json({"type": "narrative_done"})
                 narrative_text = "".join(full_narrative)
 
-                # 4. Update turn count and context
-                db_session.turn_count = (db_session.turn_count or 0) + 1
-                turn_num = db_session.turn_count
-                is_new_room = current_room != last_room
-                last_room = current_room
+                # 4. Detect room change and update playthrough
+                new_room = _extract_new_room(raw_output)
+                is_new_room = new_room is not None and new_room != current_room
+                if new_room:
+                    current_room = new_room
+
+                turn_num = (playthrough.turn_count or 0) + 1
+                playthrough.turn_count = turn_num
+                playthrough.engine_save = latest_save
+                playthrough.current_room = current_room
+                playthrough.last_active = datetime.utcnow()
 
                 context.add_turn(Turn(
                     turn_num=turn_num,
@@ -172,12 +213,12 @@ async def play(websocket: WebSocket, session_id: str):
                     enriched_narrative=narrative_text,
                     room=current_room,
                 ))
-                db_session.context_json = context.to_json()
+                playthrough.context_json = context.to_json()
                 await db.commit()
 
-                # 5. Async tasks: extract inventions + maybe generate image
+                # 5. Async: extract inventions + maybe generate image
                 asyncio.create_task(
-                    invention_ledger.extract_and_store(db, session_id, narrative_text, turn_num)
+                    invention_ledger.extract_and_store(db, playthrough_id, narrative_text, turn_num)
                 )
 
                 turns_since_image = turn_num - last_image_turn
@@ -190,7 +231,7 @@ async def play(websocket: WebSocket, session_id: str):
                             is_new_room=is_new_room,
                         )
                         if suggestion:
-                            await _generate_and_push(websocket, suggestion, current_room, session_id, style_prefix)
+                            await _generate_and_push(websocket, suggestion, current_room, playthrough_id, style_prefix)
                     asyncio.create_task(_maybe_image())
                     last_image_turn = turn_num
 
