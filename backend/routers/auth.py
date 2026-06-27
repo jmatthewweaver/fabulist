@@ -50,11 +50,9 @@ async def callback(request: Request):
         raise HTTPException(status_code=400, detail="OAuth failed")
 
     # Upsert user in DB
-    from ..models.db import User
-    from sqlalchemy.ext.asyncio import AsyncSession
-    from ..main import get_db
+    from ..deps import AsyncSessionLocal
 
-    async with get_db() as db:
+    async with AsyncSessionLocal() as db:
         user = await db.get(User, userinfo["sub"])
         if not user:
             user = User(
