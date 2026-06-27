@@ -77,6 +77,14 @@ async def play(websocket: WebSocket, session_id: str):
         last_image_turn: int = -(settings.image_cooldown_turns)  # allow image on first turn
         last_room: str = db_session.current_room or ""
 
+        # Send opening game state on first connect
+        if (db_session.turn_count or 0) == 0:
+            opening = await active.adapter.step(session_id, "look")
+            bundle = context.build_bundle(current_room="", current_inventory=[], relevant_inventions=[])
+            async for chunk in enrich_stream(opening.raw_text, bundle):
+                await websocket.send_json({"type": "narrative_chunk", "text": chunk})
+            await websocket.send_json({"type": "narrative_done"})
+
         try:
             while True:
                 data = await websocket.receive_json()
