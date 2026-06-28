@@ -146,12 +146,15 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
         for n in nodes.values():
             if n["kind"] != "room":
                 continue
-            present = [
-                {"name": m["name"], "description": m["description"]}
-                for mid in (n["children"] + n["scenery"])
-                for m in [nodes.get(str(mid))]
-                if m and m.get("description")
-            ]
+            present = []
+            for mid in n["children"]:        # direct contents — name even if no description
+                m = nodes.get(str(mid))
+                if m:
+                    present.append({"name": m["name"], "description": m.get("description", "")})
+            for sid in n["scenery"]:          # visible scenery globals
+                m = nodes.get(str(sid))
+                if m and m.get("description"):
+                    present.append({"name": m["name"], "description": m["description"]})
             if n.get("description") or present:
                 locations.append({
                     "id": n["id"], "name": n["name"],

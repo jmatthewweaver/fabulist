@@ -129,7 +129,11 @@ the place LOOKS like as a whole. Rules:
 - Integrate smoothly into flowing prose; do not just list the parts.
 - Use only what you are given; invent nothing.
 - Stay state-neutral (do not assert open/closed, lit/unlit, full/empty).
-- Ignore any "present" item whose description is empty or non-visual.
+- Some "present" items have only a name and no description — mention these briefly by
+  name (e.g. "a bird's nest sits among the branches"); do not invent their appearance.
+  Omit an item only if it is clearly abstract/non-physical.
+- Describe only the present items given; do NOT speculate about what might be inside
+  containers.
 - 2-4 sentences.
 
 Example — base "An open field west of a white house with a boarded front door", present
