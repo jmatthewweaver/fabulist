@@ -55,6 +55,9 @@ class Settings(BaseSettings):
         # Absolute so .env loads no matter the working directory (e.g. test scripts
         # run from ~/work, not the project root).
         env_file = str(BASE_DIR / ".env")
+        # The .env is shared with admin.py (ADMIN_*, BACKEND_CMD, etc.); ignore keys
+        # that aren't fields here instead of erroring.
+        extra = "ignore"
 
 
 settings = Settings()
