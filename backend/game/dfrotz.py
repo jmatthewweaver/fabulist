@@ -81,6 +81,10 @@ async def run_one_turn(
             tf = tempfile.NamedTemporaryFile(suffix=".qzl", delete=False)
             tf.close()
             save_path = tf.name
+            # dfrotz prompts "Overwrite existing file?" if the path already exists, and our
+            # piped stdin never answers it — so the save silently aborts and state never
+            # persists. Remove the empty placeholder so dfrotz writes a fresh file, no prompt.
+            Path(save_path).unlink(missing_ok=True)
             lines.append(f"save\n{save_path}")
 
         lines.append("quit\ny")

@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 from ..deps import AsyncSessionLocal
 from ..ai.command_translator import translate
 from ..ai.context_manager import ContextManager, Turn
-from ..ai.enricher import enrich_stream, describe_scene
+from ..ai.enricher import describe_scene
 from ..config import settings
 from ..models.db import Playthrough, Game, CachedScene
 from ..game.dfrotz import run_one_turn, observe_scene
@@ -202,9 +202,9 @@ async def play(websocket: WebSocket, playthrough_id: str):
         playthrough.last_active = datetime.utcnow()
         await db.commit()
 
-        bundle = context.build_bundle(current_room=opening_room, current_inventory=[], relevant_inventions=[])
-        async for chunk in enrich_stream(opening.raw_text, bundle):
-            await websocket.send_json({"type": "narrative_chunk", "text": chunk})
+        # Command results (here, the opening LOOK) are shown verbatim — the game's own
+        # text is ground truth. The AI enriches the SCENE (grey), not the action result.
+        await websocket.send_json({"type": "narrative_chunk", "text": opening.raw_text})
         await websocket.send_json({"type": "narrative_done"})
         log.info("Connect scene: room=%r turn=%s", opening_room, playthrough.turn_count)
         await websocket.send_json({
@@ -266,18 +266,11 @@ async def play(websocket: WebSocket, playthrough_id: str):
                     await websocket.send_json({"type": "error", "message": "Game engine error. Try again."})
                     continue
 
-                # 2. Stream enriched narration of the action (dynamic; not cached)
-                bundle = context.build_bundle(
-                    current_room=current_room,
-                    current_inventory=[],
-                    relevant_inventions=[],
-                )
-                full_narrative: list[str] = []
-                async for chunk in enrich_stream(raw_output, bundle):
-                    await websocket.send_json({"type": "narrative_chunk", "text": chunk})
-                    full_narrative.append(chunk)
+                # 2. Show the command result verbatim — the game's own text is ground
+                #    truth (no enrichment/hallucination; the scene block carries the AI prose).
+                await websocket.send_json({"type": "narrative_chunk", "text": raw_output})
                 await websocket.send_json({"type": "narrative_done"})
-                narrative_text = "".join(full_narrative)
+                narrative_text = raw_output
 
                 # 3. Detect room change and persist turn
                 new_room = _extract_new_room(raw_output)
