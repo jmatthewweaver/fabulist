@@ -23,6 +23,7 @@ export default function PlayPage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
   const [currentRoom, setCurrentRoom] = useState("");
+  const [sceneDescription, setSceneDescription] = useState("");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
   const pendingNarrativeRef = useRef<string[]>([]);
@@ -31,6 +32,11 @@ export default function PlayPage() {
     connectWs();
     return () => wsRef.current?.close();
   }, [playthroughId]);
+
+  // Follow the latest turn as new ones arrive (manual paging still works between turns).
+  useEffect(() => {
+    setCurrentTurn(Math.max(0, turns.length - 1));
+  }, [turns.length]);
 
   const connectWs = () => {
     const wsUrl = process.env.NEXT_PUBLIC_API_URL!.replace(/^http/, "ws");
@@ -51,14 +57,25 @@ export default function PlayPage() {
           pendingNarrativeRef.current = [];
           setStreamingText("");
           setIsStreaming(false);
-          setTurns((prev) => [
-            ...prev,
-            { id: prev.length, userInput: "", narrative: full, room: currentRoom },
-          ]);
+          setTurns((prev) => {
+            // Fill the pending command turn (the last one still awaiting its narrative);
+            // otherwise append — e.g. the opening scene, which has no preceding command.
+            if (prev.length && prev[prev.length - 1].narrative === "") {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              updated[updated.length - 1] = { ...last, narrative: full, room: currentRoom };
+              return updated;
+            }
+            return [...prev, { id: prev.length, userInput: "", narrative: full, room: currentRoom }];
+          });
           break;
         }
         case "game_state":
           setCurrentRoom(msg.room);
+          break;
+        case "scene_description":
+          setSceneDescription(msg.description || "");
+          setImageLoading(true);   // the image for this scene is on its way
           break;
         case "image_ready":
           setImageUrl(`${process.env.NEXT_PUBLIC_API_URL}${msg.url}`);
@@ -100,6 +117,7 @@ export default function PlayPage() {
     <div className="flex flex-col h-[100dvh] max-w-lg mx-auto">
       <SceneImage url={imageUrl} loading={imageLoading} roomName={currentRoom} onRequestImage={requestImage} />
       <NarrativePanel
+        sceneDescription={sceneDescription}
         text={narrativeToShow}
         isStreaming={isStreaming}
         isConnecting={isConnecting}

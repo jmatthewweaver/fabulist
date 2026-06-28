@@ -17,7 +17,8 @@ Message protocol (server → client):
   {"type": "narrative_chunk", "text": "..."}
   {"type": "narrative_done"}
   {"type": "game_state", "room": "...", "inventory": [...], "turn": N}
-  {"type": "image_ready", "url": "...", "subject": "...", "description": "..."}
+  {"type": "scene_description", "room": "...", "description": "..."}   # location text (fast)
+  {"type": "image_ready", "url": "...", "subject": "..."}              # location image (slow)
   {"type": "error", "message": "..."}
 """
 import asyncio
@@ -101,13 +102,17 @@ async def _render_scene(
             if cached and cached.image_url:
                 log.info("scene cache HIT key=%s room=%r", scene_key, room)
                 await websocket.send_json({
-                    "type": "image_ready", "subject": room,
-                    "description": cached.scene_description or "", "url": cached.image_url,
+                    "type": "scene_description", "room": room,
+                    "description": cached.scene_description or "",
                 })
+                await websocket.send_json({"type": "image_ready", "subject": room, "url": cached.image_url})
                 return
 
             log.info("scene cache MISS key=%s room=%r — generating", scene_key, room)
             description = await describe_scene(scene_output, world_bible)
+            # Send the location text immediately — the image generation that follows is slow.
+            await websocket.send_json({"type": "scene_description", "room": room, "description": description})
+
             url = await generate_scene_image(
                 scene_prompt=description,
                 style_prefix=style_prefix,
@@ -122,9 +127,7 @@ async def _render_scene(
             await db.merge(row)
             await db.commit()
 
-            await websocket.send_json({
-                "type": "image_ready", "subject": room, "description": description, "url": url,
-            })
+            await websocket.send_json({"type": "image_ready", "subject": room, "url": url})
     except Exception:
         log.exception("Scene render failed: game=%s room=%r", game_id, room)
 

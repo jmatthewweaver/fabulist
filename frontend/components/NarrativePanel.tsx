@@ -2,6 +2,7 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 interface Props {
+  sceneDescription: string;
   text: string;
   isStreaming: boolean;
   isConnecting: boolean;
@@ -11,7 +12,7 @@ interface Props {
   onNext: () => void;
 }
 
-export function NarrativePanel({ text, isStreaming, isConnecting, turnIndex, totalTurns, onPrev, onNext }: Props) {
+export function NarrativePanel({ sceneDescription, text, isStreaming, isConnecting, turnIndex, totalTurns, onPrev, onNext }: Props) {
   const canPrev = turnIndex > 0;
   const canNext = turnIndex < totalTurns - 1;
 
@@ -29,10 +30,22 @@ export function NarrativePanel({ text, isStreaming, isConnecting, turnIndex, tot
             <span>Entering the world...</span>
           </div>
         ) : (
-          <p className="narrative-text text-stone-200 whitespace-pre-wrap">
-            {text}
-            {isStreaming && <span className="animate-pulse text-stone-500">▍</span>}
-          </p>
+          <>
+            {/* Where you are — the current location, persistent until the scene changes */}
+            {sceneDescription && (
+              <p className="narrative-text text-stone-400 italic whitespace-pre-wrap">
+                {sceneDescription}
+              </p>
+            )}
+            {sceneDescription && text && (
+              <hr className="my-3 border-stone-800" />
+            )}
+            {/* What just happened — the result of your command */}
+            <p className="narrative-text text-stone-200 whitespace-pre-wrap">
+              {text}
+              {isStreaming && <span className="animate-pulse text-stone-500">▍</span>}
+            </p>
+          </>
         )}
       </div>
 
