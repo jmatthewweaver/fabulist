@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     class Config:
-        env_file = ".env"
+        # Absolute so .env loads no matter the working directory (e.g. test scripts
+        # run from ~/work, not the project root).
+        env_file = str(BASE_DIR / ".env")
 
 
 settings = Settings()
