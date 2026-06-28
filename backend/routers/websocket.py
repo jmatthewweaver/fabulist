@@ -55,8 +55,12 @@ def _extract_new_room(raw_text: str) -> str | None:
     return None
 
 
-def _room_children(world_bible: dict, room_name: str) -> list[str]:
-    """Direct-child object names of the named room, from the pre-built object tree."""
+def _room_examine_targets(world_bible: dict, room_name: str) -> list[str]:
+    """
+    Names to EXAMINE for the room: its direct children (mailbox, door) AND its scenery
+    globals (white house, forest) — the latter aren't children but are visible and carry
+    their own descriptions (e.g. the white house's "beautiful colonial house" text).
+    """
     ko = world_bible.get("known_objects") or {}
     nodes = ko.get("nodes") or {}
     name_index = ko.get("name_index") or {}
@@ -66,7 +70,14 @@ def _room_children(world_bible: dict, room_name: str) -> list[str]:
     node = nodes.get(str(ids[0]))
     if not node:
         return []
-    return [nodes[str(c)]["name"] for c in node.get("children", []) if str(c) in nodes]
+    names: list[str] = []
+    seen: set[str] = set()
+    for cid in list(node.get("children", [])) + list(node.get("scenery", [])):
+        n = nodes.get(str(cid))
+        if n and n["name"] and n["name"].lower() not in seen:
+            names.append(n["name"])
+            seen.add(n["name"].lower())
+    return names
 
 
 async def _render_scene(
@@ -152,7 +163,7 @@ async def play(websocket: WebSocket, playthrough_id: str):
             Returns the scene_key (or None if nothing observed).
             """
             nonlocal last_scene_key
-            targets = _room_children(world_bible, room)
+            targets = _room_examine_targets(world_bible, room)
             scene_output = await observe_scene(game_path, save_bytes, settings.dfrotz_path, targets)
             if not scene_output:
                 return None

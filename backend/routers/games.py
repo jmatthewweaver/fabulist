@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from ..models.db import Game, Playthrough, Style
 from ..game.dfrotz import InfodumpExtractor, run_one_turn
+from ..game.zmachine import scenery_by_id
 from ..ai.world_bible import generate_world_bible, build_vocab_index
 from ..config import settings
 from ..deps import get_db
@@ -106,7 +107,21 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     # in a room and worth EXAMINE-ing. All actual descriptions/images are produced at
     # play time from the live game state and cached by output hash (see websocket.py).
     known_objects = world_data.object_tree or {}
-    log.info("Object tree: %d nodes from %s", len(known_objects.get("nodes", {})), filename)
+    nodes = known_objects.get("nodes", {})
+    log.info("Object tree: %d nodes from %s", len(nodes), filename)
+
+    # Link each room to its scenery globals (white house, forest, ...). Pure structure
+    # like the tree — it tells the runtime to EXAMINE these visible globals (which are not
+    # direct children) when building a scene, so e.g. the white house's full description
+    # makes it in. No pre-baked descriptions here.
+    try:
+        global_ids = _collect_global_ids(known_objects)
+        for room_id, scenery_ids in scenery_by_id(str(game_path), global_ids).items():
+            node = nodes.get(str(room_id))
+            if node:
+                node["scenery"] = scenery_ids
+    except Exception:
+        log.warning("scenery linkage failed for %s", filename, exc_info=True)
 
     world_bible_dict = await generate_world_bible(world_data, opening_text, game_path.stem)
     world_bible_dict["known_objects"] = known_objects
@@ -126,6 +141,24 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
         db.add(game)
     await db.commit()
     return {"id": game_id, "title": game.title, "status": "ingested"}
+
+
+def _collect_global_ids(tree: dict) -> set[int]:
+    """All object ids under a 'Global Objects' container — used by scenery_by_id to
+    detect each room's scenery property (room exits point to rooms; scenery to globals)."""
+    nodes = tree.get("nodes", {})
+    global_ids: set[int] = set()
+    stack = [n["id"] for n in nodes.values()
+             if n["kind"] == "container" and n["name"] == "Global Objects"]
+    while stack:
+        node = nodes.get(str(stack.pop()))
+        if not node:
+            continue
+        for child_id in node["children"]:
+            if child_id not in global_ids:
+                global_ids.add(child_id)
+                stack.append(child_id)
+    return global_ids
 
 
 def _detect_format(filename: str) -> str:
