@@ -42,9 +42,10 @@ def _assemble_command(parsed: dict) -> str:
     parts = [parsed["verb"]]
     if parsed.get("noun"):
         parts.append(parsed["noun"])
-    if parsed.get("prep"):
+    # Only include a preposition when it has an object — otherwise it dangles
+    # ("go into the path" -> "go path into"). A bare prep is dropped.
+    if parsed.get("prep") and parsed.get("indirect"):
         parts.append(parsed["prep"])
-    if parsed.get("indirect"):
         parts.append(parsed["indirect"])
     return " ".join(parts)
 

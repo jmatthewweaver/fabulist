@@ -22,13 +22,19 @@ log = logging.getLogger(__name__)
 _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
-def _format_guide(guide: dict) -> str:
+def _entity_in_scene(name: str, scene_lower: str) -> bool:
+    """True if the named entity is actually referenced in the scene text (match on its
+    significant words so 'white house' matches '...white colonial house...')."""
+    words = [w for w in name.lower().split() if len(w) >= 4]
+    return any(w in scene_lower for w in words) if words else name.lower() in scene_lower
+
+
+def _format_guide(style: str, entities: dict) -> str:
     lines: list[str] = []
-    if guide.get("style"):
-        lines.append(f"Global style (apply to every image): {guide['style']}")
-    entities = guide.get("entities") or {}
+    if style:
+        lines.append(f"Global style (apply to every image): {style}")
     if entities:
-        lines.append("Recurring things must be drawn exactly like this:")
+        lines.append("If — and only if — the scene includes any of these, draw them like this:")
         lines += [f"- {name}: {desc}" for name, desc in entities.items()]
     return "\n".join(lines)
 
@@ -50,16 +56,23 @@ Write ONE image prompt that:
   camera framing, lighting, palette and weather — so it dominates the image,
 - always frames the location as a WIDE ESTABLISHING SHOT showing the whole scene at eye level
   (never a tight close-up or a different medium),
-- draws any entity named in the guide exactly as the guide specifies,
-- then faithfully depicts the scene as described.
+- depicts ONLY what the SCENE describes. Use a guide entity's appearance only when the scene
+  itself includes that thing. NEVER add buildings, objects, or features the scene does not
+  mention (a mailbox or house must not appear in a forest or up a tree).
 Phrase everything affirmatively — describe what IS present, never what is absent.
 Output only the prompt, no preamble."""
 
 
 async def augment_prompt(scene_description: str, guide: dict) -> str:
     """Rewrite a scene description into a prompt consistent with the running guide.
-    Falls back to the description unchanged when the guide is empty."""
-    if not guide or not (guide.get("style") or guide.get("entities")):
+    Only entities actually present in the scene are carried in (so the mailbox/house don't
+    follow the player around). Falls back to the description unchanged with no guide."""
+    guide = guide or {}
+    style = guide.get("style") or ""
+    scene_lower = scene_description.lower()
+    relevant = {n: d for n, d in (guide.get("entities") or {}).items()
+                if _entity_in_scene(n, scene_lower)}
+    if not style and not relevant:
         return scene_description
     try:
         response = await _client.messages.create(
@@ -67,7 +80,7 @@ async def augment_prompt(scene_description: str, guide: dict) -> str:
             max_tokens=400,
             system=_AUGMENT_SYSTEM,
             messages=[{"role": "user",
-                       "content": f"STYLE GUIDE:\n{_format_guide(guide)}\n\nSCENE:\n{scene_description}"}],
+                       "content": f"STYLE GUIDE:\n{_format_guide(style, relevant)}\n\nSCENE:\n{scene_description}"}],
         )
         return response.content[0].text.strip() or scene_description
     except Exception:
