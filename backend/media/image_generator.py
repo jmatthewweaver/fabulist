@@ -43,11 +43,12 @@ async def _submit(prompt: str, width: int, height: int, reference_b64: str | Non
     # (same lighting/weather/composition; only the described details change).
     if seed is not None:
         payload["seed"] = seed
-    # Reference image (base64) anchors a location's look across its state-variants —
-    # flux-2-pro only. Carries the house/field/weather/perspective; the prompt supplies
-    # the changed detail.
+    # Reference image (base64) anchors a location's look across its state-variants.
+    # FLUX.2's editing input is `input_image` (NOT `image_prompt`, which it ignores):
+    # it keeps the base image — house/field/weather/perspective — and applies only the
+    # prompt's change (e.g. mailbox now open).
     if reference_b64 and not mobile:
-        payload["image_prompt"] = reference_b64
+        payload["input_image"] = reference_b64
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
