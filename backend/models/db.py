@@ -99,13 +99,18 @@ class Invention(Base):
     )
 
 
-class CachedImage(Base):
-    """Shared image cache. Key: game + location + visible objects + style."""
-    __tablename__ = "cached_images"
-    cache_key = Column(String, primary_key=True)
+class CachedScene(Base):
+    """
+    Game-global cache of a rendered scene, keyed by the hash of the game's own
+    deterministic output (LOOK + EXAMINEs) plus game + style. Identical state across
+    playthroughs/visits produces the identical output hash → one render, reused forever.
+    Holds both the enriched scene description and the generated image.
+    """
+    __tablename__ = "cached_scenes"
+    cache_key = Column(String, primary_key=True)        # sha256(game_id|style_id|scene_output)
     game_id = Column(String, ForeignKey("games.id"), nullable=False)
-    style_id = Column(String, ForeignKey("styles.id"), nullable=False)
-    location_id = Column(String, nullable=False)
-    image_url = Column(String, nullable=False)
+    style_id = Column(String, nullable=False)           # may be "default" before Style records exist
+    scene_description = Column(Text)                     # enriched visual prose
+    image_url = Column(String)
     image_url_mobile = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)

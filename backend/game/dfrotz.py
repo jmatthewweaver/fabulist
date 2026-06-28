@@ -120,6 +120,80 @@ async def run_one_turn(
             Path(save_path).unlink(missing_ok=True)
 
 
+def _extract_command_outputs(stdout: str, has_restore: bool, count: int) -> list[str]:
+    """
+    Like _extract_command_output but for several commands run back-to-back.
+    Layout:  banner \\n> [restore_ok \\n>] out1 \\n> out2 \\n> ... \\n> quit_prompt
+    Returns up to `count` command outputs (in order), trimmed.
+    """
+    parts = stdout.split("\n>")
+    base = 2 if has_restore else 1
+    return [parts[base + i].strip() for i in range(count) if base + i < len(parts)]
+
+
+async def observe_scene(
+    game_path: str,
+    save_bytes: bytes | None,
+    dfrotz_path: str = "dfrotz",
+    examine_targets: list[str] | None = None,
+) -> str:
+    """
+    Non-perturbing observation of the current scene: restore the save, run `look`
+    then `examine <t>` for each target, capture each command's output, and NEVER
+    save — the real game state is untouched.
+
+    Returns the combined cleaned text (the state-correct scene). The `look` output
+    is always included; an `examine` output is dropped if it's a rejection
+    ("you can't see any X here") so out-of-scope/concealed targets add no noise.
+
+    This deterministic text is the scene's state-signature (hash it for caching).
+    """
+    targets = examine_targets or []
+    commands = ["look"] + [f"examine {t}" for t in targets]
+
+    restore_path: str | None = None
+    try:
+        lines: list[str] = []
+        if save_bytes is not None:
+            tf = tempfile.NamedTemporaryFile(suffix=".qzl", delete=False)
+            tf.write(save_bytes)
+            tf.close()
+            restore_path = tf.name
+            lines.append(f"restore\n{restore_path}")
+
+        lines.extend(commands)
+        lines.append("quit\ny")
+
+        stdin_text = "\n".join(lines) + "\n"
+        loop = asyncio.get_event_loop()
+        try:
+            stdout = await loop.run_in_executor(
+                None, lambda: _run_dfrotz_sync(game_path, stdin_text, dfrotz_path)
+            )
+        except FileNotFoundError:
+            raise RuntimeError(f"dfrotz not found at {dfrotz_path!r} — is it installed?")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("dfrotz timed out — check game file path")
+
+        outputs = _extract_command_outputs(stdout, has_restore=save_bytes is not None, count=len(commands))
+
+        kept: list[str] = []
+        for i, text in enumerate(outputs):
+            if not text:
+                continue
+            if i > 0 and _REJECTION_PATTERNS.search(text):
+                continue        # skip examine of out-of-scope/concealed target
+            kept.append(text)
+
+        scene = "\n\n".join(kept)
+        log.info("observe_scene: %d/%d outputs kept, %d chars", len(kept), len(commands), len(scene))
+        return scene
+
+    finally:
+        if restore_path:
+            Path(restore_path).unlink(missing_ok=True)
+
+
 class InfodumpExtractor(WorldExtractor):
     def __init__(self, infodump_path: str = "infodump"):
         self._infodump_path = infodump_path

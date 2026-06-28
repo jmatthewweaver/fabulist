@@ -20,8 +20,13 @@ _POLL_INTERVAL = 2.0   # seconds between polls
 _POLL_TIMEOUT = 120.0  # give up after 2 minutes
 
 
-def make_cache_key(game_id: str, location_id: str, visible_object_ids: list[str], style_id: str) -> str:
-    content = f"{game_id}|{location_id}|{sorted(visible_object_ids)}|{style_id}"
+def make_cache_key(game_id: str, style_id: str, scene_output: str) -> str:
+    """
+    Scene cache key = hash of the game's own deterministic output for the current
+    state, folded with game + style. Identical state (byte-identical LOOK/EXAMINE
+    output) → identical key → reuse; any change → new key → re-render.
+    """
+    content = f"{game_id}|{style_id}|{scene_output.strip()}"
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 

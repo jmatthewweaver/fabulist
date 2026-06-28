@@ -176,6 +176,38 @@ async def enrich_stream(raw_output: str, bundle: ContextBundle) -> AsyncIterator
             yield text
 
 
+_SCENE_SYSTEM = """You are the scene-setter for an interactive fiction game. You are given the
+game's own output describing the player's current surroundings — a LOOK plus EXAMINE of the
+things present. Write ONE vivid, present-tense visual description of the scene: what it looks
+like, for setting the scene and grounding an illustration.
+
+Rules:
+1. Describe only what the game's output states or directly implies. You may add atmosphere
+   (light, texture, material, mood) but never invent new objects, exits, or facts.
+2. Reflect the current state exactly. If the output says it is dark, the scene is dark. If a
+   thing is closed or absent, do not describe its contents.
+3. Third person, present tense. No second-person "you", no meta-commentary, no game mechanics.
+4. 2-4 sentences.
+Output only the description prose."""
+
+
+async def describe_scene(scene_output: str, world_bible: dict | str) -> str:
+    """
+    Enrich the game's own current-surroundings output (silent LOOK + EXAMINEs) into a
+    single state-correct visual description. Deterministic input ⇒ cache by scene hash.
+    """
+    wb = world_bible if isinstance(world_bible, dict) else json.loads(world_bible or "{}")
+    tone = wb.get("tone") or wb.get("setting") or ""
+    user = f"## World tone\n{tone}\n\n## Game output (current surroundings)\n{scene_output}"
+    response = await _client.messages.create(
+        model=settings.model_enrichment,
+        max_tokens=400,
+        system=_SCENE_SYSTEM,
+        messages=[{"role": "user", "content": user}],
+    )
+    return response.content[0].text.strip()
+
+
 async def extract_image_suggestion(
     narrative: str,
     raw_output: str,

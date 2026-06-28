@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     #   generous     = enricher decides + object close-ups + views
     image_mode: str = "normal"
     image_cooldown_turns: int = 3   # minimum turns between auto-generated images
+    force_regen: bool = False       # dev: bypass + overwrite the scene/image cache
 
     # App
     frontend_url: str = "http://localhost:3000"

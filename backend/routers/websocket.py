@@ -4,6 +4,11 @@ WebSocket game loop.
 Each command spins up a fresh dfrotz process: restore → command → save → kill.
 All durable state lives in the Playthrough DB record between turns.
 
+After each turn we take a NON-PERTURBING look at the current surroundings (restore →
+look + examine direct children → discard, never save) and render that scene. The scene's
+own deterministic game output is hashed into a cache key, so a given state renders once and
+is reused forever, shared across playthroughs.
+
 Message protocol (client → server):
   {"type": "command", "text": "..."}
   {"type": "request_image"}
@@ -12,7 +17,7 @@ Message protocol (server → client):
   {"type": "narrative_chunk", "text": "..."}
   {"type": "narrative_done"}
   {"type": "game_state", "room": "...", "inventory": [...], "turn": N}
-  {"type": "image_ready", "url": "...", "subject": "..."}
+  {"type": "image_ready", "url": "...", "subject": "...", "description": "..."}
   {"type": "error", "message": "..."}
 """
 import asyncio
@@ -25,13 +30,13 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 log = logging.getLogger(__name__)
 
 from ..deps import AsyncSessionLocal
-from ..ai import invention_ledger
 from ..ai.command_translator import translate
 from ..ai.context_manager import ContextManager, Turn
-from ..ai.enricher import enrich_stream, extract_image_suggestion
+from ..ai.enricher import enrich_stream, describe_scene
 from ..config import settings
-from ..models.db import Playthrough, Game
-from ..game.dfrotz import run_one_turn
+from ..models.db import Playthrough, Game, CachedScene
+from ..game.dfrotz import run_one_turn, observe_scene
+from ..media.image_generator import make_cache_key, generate_scene_image
 
 router = APIRouter()
 
@@ -50,28 +55,67 @@ def _extract_new_room(raw_text: str) -> str | None:
     return None
 
 
-async def _generate_and_push(
+def _room_children(world_bible: dict, room_name: str) -> list[str]:
+    """Direct-child object names of the named room, from the pre-built object tree."""
+    ko = world_bible.get("known_objects") or {}
+    nodes = ko.get("nodes") or {}
+    name_index = ko.get("name_index") or {}
+    ids = name_index.get(room_name.strip().lower(), [])
+    if not ids:
+        return []
+    node = nodes.get(str(ids[0]))
+    if not node:
+        return []
+    return [nodes[str(c)]["name"] for c in node.get("children", []) if str(c) in nodes]
+
+
+async def _render_scene(
     websocket: WebSocket,
-    suggestion: dict,
-    current_room: str,
-    playthrough_id: str,
+    game_id: str,
+    scene_key: str,
+    scene_output: str,
+    room: str,
+    style_id: str,
     style_prefix: str,
+    world_bible: dict,
 ):
+    """
+    Render a scene (description + image) for an already-observed scene_output, caching both
+    by scene_key (the hash of the game's own output). Cache hit → reuse; miss → generate
+    once and store forever. Runs as a background task.
+    """
     try:
-        from ..media.image_generator import generate_scene_image, make_cache_key
-        log.info("Generating image for room=%r hint=%r", current_room, suggestion.get("prompt_hint"))
-        cache_key = make_cache_key(playthrough_id, current_room, [], "default")
-        url = await generate_scene_image(
-            scene_prompt=suggestion.get("prompt_hint", current_room),
-            style_prefix=style_prefix,
-            style_negative="",
-            reference_image_urls=[],
-            cache_key=cache_key,
-        )
-        log.info("Image ready: %s", url)
-        await websocket.send_json({"type": "image_ready", "url": url, "subject": suggestion.get("subject", "")})
+        async with AsyncSessionLocal() as db:
+            cached = None if settings.force_regen else await db.get(CachedScene, scene_key)
+            if cached and cached.image_url:
+                log.info("scene cache HIT key=%s room=%r", scene_key, room)
+                await websocket.send_json({
+                    "type": "image_ready", "subject": room,
+                    "description": cached.scene_description or "", "url": cached.image_url,
+                })
+                return
+
+            log.info("scene cache MISS key=%s room=%r — generating", scene_key, room)
+            description = await describe_scene(scene_output, world_bible)
+            url = await generate_scene_image(
+                scene_prompt=description,
+                style_prefix=style_prefix,
+                style_negative="",
+                reference_image_urls=[],
+                cache_key=scene_key,
+            )
+
+            row = cached or CachedScene(cache_key=scene_key, game_id=game_id, style_id=style_id)
+            row.scene_description = description
+            row.image_url = url
+            await db.merge(row)
+            await db.commit()
+
+            await websocket.send_json({
+                "type": "image_ready", "subject": room, "description": description, "url": url,
+            })
     except Exception:
-        log.exception("Image generation failed for playthrough=%s room=%r", playthrough_id, current_room)
+        log.exception("Scene render failed: game=%s room=%r", game_id, room)
 
 
 @router.websocket("/api/playthroughs/{playthrough_id}/play")
@@ -96,9 +140,31 @@ async def play(websocket: WebSocket, playthrough_id: str):
         vocab_index: dict = game.vocab_index if isinstance(game.vocab_index, dict) else json.loads(game.vocab_index or "{}")
         vocab_verbs: list = world_bible.get("vocab_verbs", [])
         vocab_nouns: list = world_bible.get("vocab_nouns", [])
+        style_id: str = playthrough.style_id or "default"
         style_prefix: str = ""  # TODO: load from Style record
 
-        last_image_turn: int = -(settings.image_cooldown_turns)
+        last_scene_key: str | None = None
+
+        async def observe_and_render(room: str, save_bytes: bytes | None, *, dedup: bool):
+            """
+            Non-perturbingly observe the current scene, then render it in the background.
+            With dedup=True, skips when the scene hasn't changed since the last render.
+            Returns the scene_key (or None if nothing observed).
+            """
+            nonlocal last_scene_key
+            targets = _room_children(world_bible, room)
+            scene_output = await observe_scene(game_path, save_bytes, settings.dfrotz_path, targets)
+            if not scene_output:
+                return None
+            scene_key = make_cache_key(game.id, style_id, scene_output)
+            if dedup and scene_key == last_scene_key:
+                return scene_key
+            last_scene_key = scene_key
+            asyncio.create_task(_render_scene(
+                websocket, game.id, scene_key, scene_output, room,
+                style_id, style_prefix, world_bible,
+            ))
+            return scene_key
 
         # First connect: run "look" on a fresh process with no prior save
         if (playthrough.turn_count or 0) == 0:
@@ -123,24 +189,13 @@ async def play(websocket: WebSocket, playthrough_id: str):
             await db.commit()
 
             bundle = context.build_bundle(current_room=opening_room, current_inventory=[], relevant_inventions=[])
-            opening_narrative: list[str] = []
             async for chunk in enrich_stream(opening.raw_text, bundle):
                 await websocket.send_json({"type": "narrative_chunk", "text": chunk})
-                opening_narrative.append(chunk)
             await websocket.send_json({"type": "narrative_done"})
             log.info("Opening scene: room=%r", opening_room)
             await websocket.send_json({"type": "game_state", "room": opening_room, "inventory": [], "turn": 0})
 
-            async def _opening_image():
-                suggestion = await extract_image_suggestion(
-                    narrative="".join(opening_narrative),
-                    raw_output=opening.raw_text,
-                    current_room=opening_room,
-                    is_new_room=True,
-                )
-                if suggestion:
-                    await _generate_and_push(websocket, suggestion, opening_room, playthrough_id, style_prefix)
-            asyncio.create_task(_opening_image())
+            await observe_and_render(opening_room, None, dedup=False)   # None = initial state
 
         try:
             while True:
@@ -148,13 +203,8 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 msg_type = data.get("type")
 
                 if msg_type == "request_image":
-                    room = playthrough.current_room or ""
-                    asyncio.create_task(_generate_and_push(
-                        websocket,
-                        {"suggest": True, "type": "room_wide", "subject": room,
-                         "prompt_hint": f"{room} interior"},
-                        room, playthrough_id, style_prefix,
-                    ))
+                    # Render the current state on demand (reuses cache if present).
+                    await observe_and_render(playthrough.current_room or "", playthrough.engine_save, dedup=False)
                     continue
 
                 if msg_type != "command":
@@ -168,7 +218,6 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 visible_objects: list[str] = []
 
                 # 1. Translate natural language → game command via dfrotz
-                # step_fn runs one turn; captures save bytes on success
                 latest_save = playthrough.engine_save
 
                 async def step_fn(cmd: str):
@@ -201,18 +250,11 @@ async def play(websocket: WebSocket, playthrough_id: str):
                     await websocket.send_json({"type": "error", "message": "Game engine error. Try again."})
                     continue
 
-                # 2. Fetch relevant inventions
-                exact_inventions = await invention_ledger.lookup(db, playthrough_id, visible_objects)
-                scene_desc = f"{current_room}. {raw_output[:300]}"
-                semantic_inventions = await invention_ledger.semantic_context(db, playthrough_id, scene_desc)
-                seen = {i["object_key"] for i in exact_inventions}
-                inventions = exact_inventions + [i for i in semantic_inventions if i["object_key"] not in seen]
-
-                # 3. Stream enriched narrative
+                # 2. Stream enriched narration of the action (dynamic; not cached)
                 bundle = context.build_bundle(
                     current_room=current_room,
                     current_inventory=[],
-                    relevant_inventions=inventions,
+                    relevant_inventions=[],
                 )
                 full_narrative: list[str] = []
                 async for chunk in enrich_stream(raw_output, bundle):
@@ -221,9 +263,8 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 await websocket.send_json({"type": "narrative_done"})
                 narrative_text = "".join(full_narrative)
 
-                # 4. Detect room change and update playthrough
+                # 3. Detect room change and persist turn
                 new_room = _extract_new_room(raw_output)
-                is_new_room = new_room is not None and new_room != current_room
                 if new_room:
                     current_room = new_room
 
@@ -243,32 +284,17 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 playthrough.context_json = context.to_json()
                 await db.commit()
 
-                # 5. Async: extract inventions + maybe generate image
-                asyncio.create_task(
-                    invention_ledger.extract_and_store(db, playthrough_id, narrative_text, turn_num)
-                )
-
-                turns_since_image = turn_num - last_image_turn
-                if turns_since_image >= settings.image_cooldown_turns:
-                    async def _maybe_image():
-                        suggestion = await extract_image_suggestion(
-                            narrative=narrative_text,
-                            raw_output=raw_output,
-                            current_room=current_room,
-                            is_new_room=is_new_room,
-                        )
-                        if suggestion:
-                            await _generate_and_push(websocket, suggestion, current_room, playthrough_id, style_prefix)
-                    asyncio.create_task(_maybe_image())
-                    last_image_turn = turn_num
-
-                # 6. Send updated game state
+                # 4. Send updated game state
                 await websocket.send_json({
                     "type": "game_state",
                     "room": current_room,
                     "inventory": [],
                     "turn": turn_num,
                 })
+
+                # 5. Observe the current scene; render only if it actually changed.
+                #    (cheap dfrotz look; the scene cache makes repeat states free)
+                await observe_and_render(current_room, latest_save, dedup=True)
 
         except WebSocketDisconnect:
             log.info("WebSocket disconnected: playthrough=%s", playthrough_id)

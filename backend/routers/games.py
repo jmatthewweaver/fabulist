@@ -14,10 +14,7 @@ from sqlalchemy import select
 
 from ..models.db import Game, Playthrough, Style
 from ..game.dfrotz import InfodumpExtractor, run_one_turn
-from ..game.zmachine import routine_props_by_id, scenery_by_id
-from ..game.txd import extract_candidates
 from ..ai.world_bible import generate_world_bible, build_vocab_index
-from ..ai.describe_objects import synthesize_descriptions, compose_locations
 from ..config import settings
 from ..deps import get_db
 from .auth import decode_jwt
@@ -104,69 +101,12 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     )
     opening_text = opening_result.raw_text
 
-    # Object containment tree (id-keyed) parsed from infodump.
+    # Object containment tree (id-keyed) parsed from infodump. This is the only
+    # ingestion-time description work: it tells the runtime which objects are present
+    # in a room and worth EXAMINE-ing. All actual descriptions/images are produced at
+    # play time from the live game state and cached by output hash (see websocket.py).
     known_objects = world_data.object_tree or {}
-    nodes = known_objects.get("nodes", {})
-    log.info("Object tree: %d nodes from %s", len(nodes), filename)
-
-    # Attach clean description candidates per object via txd (Step 2), then synthesize
-    # a state-neutral visual description per object (Step 3). Failures here must not
-    # block ingestion — descriptions simply stay empty.
-    try:
-        prop_addrs = routine_props_by_id(str(game_path))
-        candidates = extract_candidates(str(game_path), prop_addrs, settings.txd_path)
-        for obj_id, strings in candidates.items():
-            node = nodes.get(str(obj_id))
-            if node:
-                node["candidates"] = strings
-        log.info("txd: candidates for %d/%d objects", len(candidates), len(nodes))
-
-        describable = [
-            {"id": n["id"], "name": n["name"], "kind": n["kind"], "candidates": n["candidates"]}
-            for n in nodes.values() if n.get("candidates")
-        ]
-        descriptions = await synthesize_descriptions(describable)
-        for obj_id, desc in descriptions.items():
-            node = nodes.get(str(obj_id))
-            if node:
-                node["description"] = desc
-        log.info("synthesized descriptions for %d/%d objects", len(descriptions), len(describable))
-
-        # Link each room to its scenery globals (white house, forest, ...) so the
-        # enricher/image always has them, even when a turn's text doesn't name them.
-        global_ids = _collect_global_ids(known_objects)
-        for room_id, scenery_ids in scenery_by_id(str(game_path), global_ids).items():
-            node = nodes.get(str(room_id))
-            if node:
-                node["scenery"] = scenery_ids
-
-        # Compose one cohesive description per location from its own description plus
-        # its (structural) contents and scenery — no name-matching needed downstream.
-        locations = []
-        for n in nodes.values():
-            if n["kind"] != "room":
-                continue
-            present = []
-            for mid in n["children"]:        # direct contents — name even if no description
-                m = nodes.get(str(mid))
-                if m:
-                    present.append({"name": m["name"], "description": m.get("description", "")})
-            for sid in n["scenery"]:          # visible scenery globals
-                m = nodes.get(str(sid))
-                if m and m.get("description"):
-                    present.append({"name": m["name"], "description": m["description"]})
-            if n.get("description") or present:
-                locations.append({
-                    "id": n["id"], "name": n["name"],
-                    "description": n.get("description", ""), "present": present,
-                })
-        for room_id, loc in (await compose_locations(locations)).items():
-            node = nodes.get(str(room_id))
-            if node:
-                node["location_description"] = loc
-        log.info("composed location descriptions for %d rooms", len(locations))
-    except Exception:
-        log.warning("description extraction/synthesis failed for %s", filename, exc_info=True)
+    log.info("Object tree: %d nodes from %s", len(known_objects.get("nodes", {})), filename)
 
     world_bible_dict = await generate_world_bible(world_data, opening_text, game_path.stem)
     world_bible_dict["known_objects"] = known_objects
@@ -186,24 +126,6 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
         db.add(game)
     await db.commit()
     return {"id": game_id, "title": game.title, "status": "ingested"}
-
-
-def _collect_global_ids(tree: dict) -> set[int]:
-    """All object ids that live under a 'Global Objects' container (used to detect
-    each room's scenery property — see zmachine.scenery_by_id)."""
-    nodes = tree.get("nodes", {})
-    global_ids: set[int] = set()
-    stack = [n["id"] for n in nodes.values()
-             if n["kind"] == "container" and n["name"] == "Global Objects"]
-    while stack:
-        node = nodes.get(str(stack.pop()))
-        if not node:
-            continue
-        for child_id in node["children"]:
-            if child_id not in global_ids:
-                global_ids.add(child_id)
-                stack.append(child_id)
-    return global_ids
 
 
 def _detect_format(filename: str) -> str:
