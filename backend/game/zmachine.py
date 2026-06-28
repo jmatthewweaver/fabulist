@@ -260,6 +260,59 @@ def routine_props_by_id(
     return result
 
 
+def scenery_by_id(game_path: str, global_ids: set[int]) -> dict[int, list[int]]:
+    """
+    For each object, find its "scenery" property — the room property that lists the
+    local-global / scenery objects visible there (white house, forest, ...). In ZIL
+    this is a property whose bytes are a list of global-object ids.
+
+    Detection is id-space based, not property-number based (robust across games):
+    room *exit* properties hold room ids, while the scenery property holds ids from
+    the global-objects container. We pick, per object, the longest property whose
+    every byte is a known global id.
+
+    Returns {obj_id: [scenery object ids]}.
+    """
+    data = Path(game_path).read_bytes()
+    if data[0] != 3:
+        raise ValueError(f"Only Z-machine v3 is supported (this file is v{data[0]})")
+
+    obj_table = struct.unpack_from(">H", data, 0x0A)[0]
+    first_obj = obj_table + 31 * 2
+    OBJ_ENTRY = 9
+
+    result: dict[int, list[int]] = {}
+    for obj_id in range(1, 256):
+        entry = first_obj + (obj_id - 1) * OBJ_ENTRY
+        if entry + OBJ_ENTRY > len(data):
+            break
+        prop_addr = struct.unpack_from(">H", data, entry + 7)[0]
+        if prop_addr == 0 or prop_addr >= len(data):
+            break
+
+        name_words = data[prop_addr]
+        if name_words > 20:
+            break
+
+        pos = prop_addr + 1 + name_words * 2
+        best: list[int] = []
+        while pos < len(data):
+            sb = data[pos]
+            if sb == 0:
+                break
+            size = (sb >> 5) + 1
+            pos += 1
+            vals = list(data[pos:pos + size])
+            pos += size
+            if vals and all(v in global_ids for v in vals) and len(vals) > len(best):
+                best = vals
+
+        if best:
+            result[obj_id] = best
+
+    return result
+
+
 def _read_flat_objects(
     data: bytes,
     abbreviations: list[str],

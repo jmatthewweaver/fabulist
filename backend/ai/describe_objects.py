@@ -109,3 +109,68 @@ async def synthesize_descriptions(objects: list[dict]) -> dict[int, str]:
     for r in results:
         merged.update(r)
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Step 4: compose one cohesive description per location
+# ---------------------------------------------------------------------------
+
+_LOCATION_BATCH_SIZE = 15
+
+_LOCATION_SYSTEM = """You compose ONE cohesive visual description of a location in a
+text-adventure game, used for image generation and scene-setting.
+
+For each location you get: its own base description, and the descriptions of the notable
+things present there ("present" = objects in the room and visible scenery like a distant
+house or forest).
+
+Weave these into a single natural, present-tense, third-person paragraph describing what
+the place LOOKS like as a whole. Rules:
+- Integrate smoothly into flowing prose; do not just list the parts.
+- Use only what you are given; invent nothing.
+- Stay state-neutral (do not assert open/closed, lit/unlit, full/empty).
+- Ignore any "present" item whose description is empty or non-visual.
+- 2-4 sentences.
+
+Example — base "An open field west of a white house with a boarded front door", present
+[white house: "a beautiful colonial house painted white", mailbox: "a small mailbox
+securely anchored"] -> "An open field west of a white house with a boarded front door.
+The house is a beautiful colonial structure painted white, and a small mailbox stands
+securely anchored nearby."
+
+Return ONLY a JSON array, no prose: [{"id": <int>, "location": <string>}, ...]"""
+
+
+async def _compose_batch(batch: list[dict]) -> dict[int, str]:
+    response = await _client.messages.create(
+        model=settings.model_enrichment,
+        max_tokens=2500,
+        system=_LOCATION_SYSTEM,
+        messages=[{"role": "user", "content": json.dumps(batch, ensure_ascii=False)}],
+    )
+    try:
+        items = _parse_json_array(response.content[0].text)
+    except (json.JSONDecodeError, IndexError):
+        log.warning("location batch returned unparseable JSON", exc_info=True)
+        return {}
+
+    out: dict[int, str] = {}
+    for item in items:
+        loc = item.get("location")
+        if isinstance(item.get("id"), int) and isinstance(loc, str) and loc.strip():
+            out[item["id"]] = loc.strip()
+    return out
+
+
+async def compose_locations(locations: list[dict]) -> dict[int, str]:
+    """
+    locations: [{id, name, description, present: [{name, description}, ...]}]
+    Returns {id: composed_location_description}.
+    """
+    batches = [locations[i:i + _LOCATION_BATCH_SIZE]
+               for i in range(0, len(locations), _LOCATION_BATCH_SIZE)]
+    results = await asyncio.gather(*(_compose_batch(b) for b in batches))
+    merged: dict[int, str] = {}
+    for r in results:
+        merged.update(r)
+    return merged

@@ -215,6 +215,8 @@ def _parse_object_tree(dump: str) -> dict:
             "kind": "object",
             "description": "",
             "candidates": [],
+            "scenery": [],      # global/local-global object ids visible from a room
+            "location_description": "",   # composed room+contents+scenery (rooms only)
         }
         if parent is None:
             roots.append(oid)

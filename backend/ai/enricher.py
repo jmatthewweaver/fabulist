@@ -71,60 +71,49 @@ def _scene_knowledge(
     limit: int = 10,
 ) -> str:
     """
-    Build a compact scene-knowledge block for the enricher prompt from the id-keyed
-    object tree ({nodes, roots, name_index}).
+    Scene-knowledge block for the enricher, drawn from the id-keyed object tree
+    ({nodes, roots, name_index}).
 
-    Includes:
-      - Current room (resolved via name_index) and its description, if known
-      - Room's initial contents and their descriptions (one container level deep)
-      - Other objects named in raw_output that carry a known description
+    Resolution is purely structural — the current room is found by name, then its
+    pre-composed location description (room + contents + scenery, built at ingestion)
+    is used. We deliberately avoid substring name-matching across objects: two rooms
+    can both contain a "lamp", and a fuzzy match would pull the wrong one.
 
-    Descriptions may be empty (populated in a later pipeline step); contents names
-    alone are still useful context.  Returns "" if the structure isn't present.
+    Falls back to assembling room + children + scenery descriptions if no composed
+    location description exists. Returns "" if the structure isn't present.
     """
     nodes = known_objects.get("nodes")
     if not nodes:
         return ""
     name_index = known_objects.get("name_index", {})
-    raw_lower = raw_output.lower()
 
+    room_ids = name_index.get(current_room.strip().lower(), [])
+    room_node = nodes.get(str(room_ids[0])) if room_ids else None
+    if not room_node:
+        return ""
+
+    composed = room_node.get("location_description")
+    if composed:
+        return f"[Location] {room_node['name']}: {composed}"
+
+    # Fallback: assemble from structural members only (no name-matching).
     def labeled(node: dict, tag: str) -> str:
         desc = node.get("description", "")
         return f"{tag} {node['name']}" + (f": {desc}" if desc else "")
 
     lines: list[str] = []
-    seen: set[int] = set()
-
-    room_ids = name_index.get(current_room.strip().lower(), [])
-    room_node = nodes.get(str(room_ids[0])) if room_ids else None
-    if room_node:
+    if room_node.get("description"):
         lines.append(labeled(room_node, "[Room]"))
-        seen.add(room_node["id"])
-        for cid in room_node.get("children", []):
-            child = nodes.get(str(cid))
-            if not child:
-                continue
+    for cid in room_node.get("children", []):
+        child = nodes.get(str(cid))
+        if child and child.get("description"):
             lines.append(labeled(child, "[In room]"))
-            seen.add(child["id"])
-            for gcid in child.get("children", []):
-                gc = nodes.get(str(gcid))
-                if not gc or gc["id"] in seen:
-                    continue
-                lines.append(labeled(gc, f"  [Inside {child['name']}]"))
-                seen.add(gc["id"])
-            if len(lines) >= limit:
-                break
+    for sid in room_node.get("scenery", []):
+        s = nodes.get(str(sid))
+        if s and s.get("description"):
+            lines.append(labeled(s, "[Scenery]"))
 
-    # Objects mentioned in game output but not already covered (need a description)
-    for node in nodes.values():
-        if len(lines) >= limit:
-            break
-        nm = node["name"].strip().lower()
-        if node["id"] not in seen and nm and nm in raw_lower and node.get("description"):
-            lines.append(labeled(node, "[Mentioned]"))
-            seen.add(node["id"])
-
-    return "\n".join(lines)
+    return "\n".join(lines[:limit])
 
 
 def _build_user_prompt(raw_output: str, bundle: ContextBundle) -> str:
