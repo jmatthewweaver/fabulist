@@ -45,10 +45,13 @@ _AUGMENT_SYSTEM = """You write a single image-generation prompt that keeps a gam
 visually consistent. You are given a STYLE GUIDE (the established global look, and how specific
 recurring things must appear) and a SCENE to depict.
 
-Rewrite the scene into ONE vivid image prompt that:
-- applies the guide's global style, palette, lighting, weather and medium,
+Write ONE image prompt that:
+- BEGINS with the guide's global style verbatim — the MEDIUM (e.g. "realistic photograph"),
+  camera framing, lighting, palette and weather — so it dominates the image,
+- always frames the location as a WIDE ESTABLISHING SHOT showing the whole scene at eye level
+  (never a tight close-up or a different medium),
 - draws any entity named in the guide exactly as the guide specifies,
-- otherwise faithfully depicts the scene as described.
+- then faithfully depicts the scene as described.
 Phrase everything affirmatively — describe what IS present, never what is absent.
 Output only the prompt, no preamble."""
 
@@ -77,7 +80,9 @@ the current guide, the scene description, and the IMAGE that was generated. Upda
 from what the image actually shows.
 
 Return ONLY JSON: {"style": "...", "entities": {"<name>": "<appearance>"}}
-- "style": one paragraph capturing the overall medium, palette, lighting, weather and mood.
+- "style": one paragraph that MUST begin by naming the MEDIUM explicitly (e.g. "realistic
+  photograph" vs "painterly digital illustration" vs "3D render") and the camera framing
+  (e.g. "wide establishing shot at eye level"), then palette, lighting, weather and mood.
   This is set from the FIRST image and must stay STABLE — repeat the existing style almost
   verbatim unless it is clearly wrong.
 - "entities": canonical, concise appearances of NOTABLE, RECURRING things in the image

@@ -230,6 +230,8 @@ changed, to apply as an edit to the reference image.
 
 Rules:
 - Mention only the changed objects and their new state. Do NOT restate anything unchanged.
+- Only change an object's state, contents, or appearance — NEVER move, resize, or re-place
+  anything, and never change the framing or background.
 - Phrase affirmatively — say what IS there, never what is absent ("the mailbox is empty", not
   "the leaflet is gone").
 - If nothing that would be visible in an image changed, output exactly: no change

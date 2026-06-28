@@ -137,8 +137,10 @@ async def _render_scene(
                 except OSError:
                     ref_b64 = None
 
-            # Stable seed per (game, style, location) backs up the reference for consistency.
-            seed = int(hashlib.sha256(f"{game_id}|{style_id}|{room}".encode()).hexdigest()[:8], 16)
+            # One global seed per (game, style) — shared across ALL locations — anchors the
+            # latent look so different rooms stay stylistically consistent. Within-room
+            # variants ride the reference image, so a shared seed doesn't hurt them.
+            seed = int(hashlib.sha256(f"{game_id}|{style_id}".encode()).hexdigest()[:8], 16)
             guide: dict = {}
 
             if ref_b64 and ref.scene_description:
