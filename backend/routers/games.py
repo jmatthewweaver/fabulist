@@ -17,6 +17,7 @@ from ..game.dfrotz import InfodumpExtractor, run_one_turn
 from ..game.zmachine import routine_props_by_id
 from ..game.txd import extract_candidates
 from ..ai.world_bible import generate_world_bible, build_vocab_index
+from ..ai.describe_objects import synthesize_descriptions
 from ..config import settings
 from ..deps import get_db
 from .auth import decode_jwt
@@ -108,8 +109,9 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     nodes = known_objects.get("nodes", {})
     log.info("Object tree: %d nodes from %s", len(nodes), filename)
 
-    # Attach clean description candidates per object via txd (Step 2). Failure here
-    # must not block ingestion — candidates simply stay empty.
+    # Attach clean description candidates per object via txd (Step 2), then synthesize
+    # a state-neutral visual description per object (Step 3). Failures here must not
+    # block ingestion — descriptions simply stay empty.
     try:
         prop_addrs = routine_props_by_id(str(game_path))
         candidates = extract_candidates(str(game_path), prop_addrs, settings.txd_path)
@@ -118,8 +120,19 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
             if node:
                 node["candidates"] = strings
         log.info("txd: candidates for %d/%d objects", len(candidates), len(nodes))
+
+        describable = [
+            {"id": n["id"], "name": n["name"], "kind": n["kind"], "candidates": n["candidates"]}
+            for n in nodes.values() if n.get("candidates")
+        ]
+        descriptions = await synthesize_descriptions(describable)
+        for obj_id, desc in descriptions.items():
+            node = nodes.get(str(obj_id))
+            if node:
+                node["description"] = desc
+        log.info("synthesized descriptions for %d/%d objects", len(descriptions), len(describable))
     except Exception:
-        log.warning("txd candidate extraction failed for %s", filename, exc_info=True)
+        log.warning("description extraction/synthesis failed for %s", filename, exc_info=True)
 
     world_bible_dict = await generate_world_bible(world_data, opening_text, game_path.stem)
     world_bible_dict["known_objects"] = known_objects
