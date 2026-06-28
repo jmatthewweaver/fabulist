@@ -177,36 +177,38 @@ async def play(websocket: WebSocket, playthrough_id: str):
             ))
             return scene_key
 
-        # First connect: run "look" on a fresh process with no prior save
-        if (playthrough.turn_count or 0) == 0:
-            try:
-                # persist=False: skip saving after "look" — initial game state is always
-                # reproducible from scratch, and the save command deadlocks on pipe buffering.
-                opening, _ = await run_one_turn(
-                    game_path, "look", None, settings.dfrotz_path, persist=False
-                )
-            except Exception:
-                log.exception("Failed to start game: playthrough=%s game=%s path=%s",
-                              playthrough_id, game.title, game_path)
-                await websocket.send_json({"type": "error", "message": "Failed to start the game engine. Check server logs."})
-                await websocket.close()
-                return
+        # On connect, always show the CURRENT scene — works for a fresh playthrough
+        # (no save → initial state) and a resumed one (restore the current save). This
+        # also unblocks the client's "Entering the world…" state, which clears on the
+        # first narrative chunk.
+        try:
+            # persist=False: never save during a look — non-perturbing, and the save
+            # command deadlocks on pipe buffering.
+            opening, _ = await run_one_turn(
+                game_path, "look", playthrough.engine_save, settings.dfrotz_path, persist=False
+            )
+        except Exception:
+            log.exception("Failed to start game: playthrough=%s game=%s path=%s",
+                          playthrough_id, game.title, game_path)
+            await websocket.send_json({"type": "error", "message": "Failed to start the game engine. Check server logs."})
+            await websocket.close()
+            return
 
-            opening_room = _extract_new_room(opening.raw_text) or ""
-            # engine_save stays None; the first player command will start from initial game state
-            playthrough.current_room = opening_room
-            playthrough.context_json = context.to_json()
-            playthrough.last_active = datetime.utcnow()
-            await db.commit()
+        opening_room = _extract_new_room(opening.raw_text) or playthrough.current_room or ""
+        playthrough.current_room = opening_room
+        playthrough.last_active = datetime.utcnow()
+        await db.commit()
 
-            bundle = context.build_bundle(current_room=opening_room, current_inventory=[], relevant_inventions=[])
-            async for chunk in enrich_stream(opening.raw_text, bundle):
-                await websocket.send_json({"type": "narrative_chunk", "text": chunk})
-            await websocket.send_json({"type": "narrative_done"})
-            log.info("Opening scene: room=%r", opening_room)
-            await websocket.send_json({"type": "game_state", "room": opening_room, "inventory": [], "turn": 0})
+        bundle = context.build_bundle(current_room=opening_room, current_inventory=[], relevant_inventions=[])
+        async for chunk in enrich_stream(opening.raw_text, bundle):
+            await websocket.send_json({"type": "narrative_chunk", "text": chunk})
+        await websocket.send_json({"type": "narrative_done"})
+        log.info("Connect scene: room=%r turn=%s", opening_room, playthrough.turn_count)
+        await websocket.send_json({
+            "type": "game_state", "room": opening_room, "inventory": [], "turn": playthrough.turn_count or 0,
+        })
 
-            await observe_and_render(opening_room, None, dedup=False)   # None = initial state
+        await observe_and_render(opening_room, playthrough.engine_save, dedup=False)
 
         try:
             while True:
