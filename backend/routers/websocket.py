@@ -22,6 +22,7 @@ Message protocol (server → client):
   {"type": "error", "message": "..."}
 """
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime
@@ -113,12 +114,16 @@ async def _render_scene(
             # Send the location text immediately — the image generation that follows is slow.
             await websocket.send_json({"type": "scene_description", "room": room, "description": description})
 
+            # One stable seed per (game, style, location) so a room's state-variants
+            # (closed/open/empty mailbox) keep the same lighting, weather and composition.
+            seed = int(hashlib.sha256(f"{game_id}|{style_id}|{room}".encode()).hexdigest()[:8], 16)
             url = await generate_scene_image(
                 scene_prompt=description,
                 style_prefix=style_prefix,
                 style_negative="",
                 reference_image_urls=[],
                 cache_key=scene_key,
+                seed=seed,
             )
 
             row = cached or CachedScene(cache_key=scene_key, game_id=game_id, style_id=style_id)

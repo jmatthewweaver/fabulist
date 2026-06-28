@@ -30,7 +30,8 @@ def make_cache_key(game_id: str, style_id: str, scene_output: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
-async def _submit(prompt: str, width: int, height: int, reference_urls: list[str], mobile: bool) -> str:
+async def _submit(prompt: str, width: int, height: int, reference_urls: list[str],
+                  mobile: bool, seed: int | None = None) -> str:
     """Submit generation request, return polling_url."""
     model = settings.bfl_model_mobile if mobile else settings.bfl_model_desktop
     payload: dict = {
@@ -38,6 +39,10 @@ async def _submit(prompt: str, width: int, height: int, reference_urls: list[str
         "width": width,
         "height": height,
     }
+    # Deterministic seed keeps a location's state-variants visually consistent
+    # (same lighting/weather/composition; only the described details change).
+    if seed is not None:
+        payload["seed"] = seed
     # Reference image support — flux-2-pro only
     if reference_urls and not mobile:
         payload["image_prompt"] = reference_urls[0]  # style seed as primary reference
@@ -84,12 +89,13 @@ async def generate_scene_image(
     reference_image_urls: list[str],
     cache_key: str,
     mobile: bool = False,
+    seed: int | None = None,
 ) -> str:
     """Generate image, save locally, return local URL path."""
     width, height = (512, 384) if mobile else (1024, 768)
     full_prompt = f"{style_prefix} {scene_prompt}".strip()
 
-    polling_url = await _submit(full_prompt, width, height, reference_image_urls, mobile)
+    polling_url = await _submit(full_prompt, width, height, reference_image_urls, mobile, seed)
     bfl_url = await _poll(polling_url)
 
     # Download and store permanently
