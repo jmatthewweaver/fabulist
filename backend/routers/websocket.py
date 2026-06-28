@@ -22,12 +22,15 @@ Message protocol (server → client):
   {"type": "error", "message": "..."}
 """
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 
 log = logging.getLogger(__name__)
 
@@ -114,19 +117,38 @@ async def _render_scene(
             # Send the location text immediately — the image generation that follows is slow.
             await websocket.send_json({"type": "scene_description", "room": room, "description": description})
 
-            # One stable seed per (game, style, location) so a room's state-variants
-            # (closed/open/empty mailbox) keep the same lighting, weather and composition.
+            # Location reference image: the EARLIEST rendered scene for this (game, style,
+            # room) anchors the look (house/field/weather/perspective) across all of the
+            # room's state-variants — stable regardless of action order or cache state.
+            ref_b64 = None
+            ref = await db.scalar(
+                select(CachedScene)
+                .where(CachedScene.game_id == game_id, CachedScene.style_id == style_id,
+                       CachedScene.room == room, CachedScene.image_url.isnot(None))
+                .order_by(CachedScene.created_at.asc())
+                .limit(1)
+            )
+            if ref and ref.cache_key != scene_key and ref.image_url:
+                ref_path = Path(settings.images_dir) / f"{ref.cache_key}.jpg"
+                try:
+                    ref_b64 = base64.b64encode(ref_path.read_bytes()).decode()
+                    log.info("scene reference: room=%r anchored to key=%s", room, ref.cache_key)
+                except OSError:
+                    ref_b64 = None
+
+            # Stable seed per (game, style, location) backs up the reference for consistency.
             seed = int(hashlib.sha256(f"{game_id}|{style_id}|{room}".encode()).hexdigest()[:8], 16)
             url = await generate_scene_image(
                 scene_prompt=description,
                 style_prefix=style_prefix,
                 style_negative="",
-                reference_image_urls=[],
                 cache_key=scene_key,
                 seed=seed,
+                reference_image_b64=ref_b64,
             )
 
             row = cached or CachedScene(cache_key=scene_key, game_id=game_id, style_id=style_id)
+            row.room = room
             row.scene_description = description
             row.image_url = url
             await db.merge(row)

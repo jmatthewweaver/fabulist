@@ -110,6 +110,8 @@ class CachedScene(Base):
     cache_key = Column(String, primary_key=True)        # sha256(game_id|style_id|scene_output)
     game_id = Column(String, ForeignKey("games.id"), nullable=False)
     style_id = Column(String, nullable=False)           # may be "default" before Style records exist
+    room = Column(String)                               # location name; the earliest row per
+                                                        # (game,style,room) is that location's image reference
     scene_description = Column(Text)                     # enriched visual prose
     image_url = Column(String)
     image_url_mobile = Column(String)

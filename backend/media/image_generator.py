@@ -30,7 +30,7 @@ def make_cache_key(game_id: str, style_id: str, scene_output: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
-async def _submit(prompt: str, width: int, height: int, reference_urls: list[str],
+async def _submit(prompt: str, width: int, height: int, reference_b64: str | None,
                   mobile: bool, seed: int | None = None) -> str:
     """Submit generation request, return polling_url."""
     model = settings.bfl_model_mobile if mobile else settings.bfl_model_desktop
@@ -43,9 +43,11 @@ async def _submit(prompt: str, width: int, height: int, reference_urls: list[str
     # (same lighting/weather/composition; only the described details change).
     if seed is not None:
         payload["seed"] = seed
-    # Reference image support — flux-2-pro only
-    if reference_urls and not mobile:
-        payload["image_prompt"] = reference_urls[0]  # style seed as primary reference
+    # Reference image (base64) anchors a location's look across its state-variants —
+    # flux-2-pro only. Carries the house/field/weather/perspective; the prompt supplies
+    # the changed detail.
+    if reference_b64 and not mobile:
+        payload["image_prompt"] = reference_b64
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -86,16 +88,16 @@ async def generate_scene_image(
     scene_prompt: str,
     style_prefix: str,
     style_negative: str,         # BFL doesn't support negative prompts yet — kept for API compat
-    reference_image_urls: list[str],
     cache_key: str,
     mobile: bool = False,
     seed: int | None = None,
+    reference_image_b64: str | None = None,
 ) -> str:
     """Generate image, save locally, return local URL path."""
     width, height = (512, 384) if mobile else (1024, 768)
     full_prompt = f"{style_prefix} {scene_prompt}".strip()
 
-    polling_url = await _submit(full_prompt, width, height, reference_image_urls, mobile, seed)
+    polling_url = await _submit(full_prompt, width, height, reference_image_b64, mobile, seed)
     bfl_url = await _poll(polling_url)
 
     # Download and store permanently
@@ -122,7 +124,6 @@ async def generate_style_seed(
         scene_prompt=prompt,
         style_prefix="",
         style_negative="",
-        reference_image_urls=[],
         cache_key=seed_key,
     )
 

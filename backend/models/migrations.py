@@ -55,6 +55,9 @@ _DDL = [
     USING bm25 (full_text)
     WITH (text_config='english')
     """,
+
+    # cached_scenes gained a `room` column (location reference image lookup)
+    "ALTER TABLE IF EXISTS cached_scenes ADD COLUMN IF NOT EXISTS room VARCHAR",
 ]
 
 
