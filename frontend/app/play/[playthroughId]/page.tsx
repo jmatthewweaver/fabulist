@@ -118,6 +118,7 @@ export default function PlayPage() {
       <SceneImage url={imageUrl} loading={imageLoading} roomName={currentRoom} onRequestImage={requestImage} />
       <NarrativePanel
         sceneDescription={sceneDescription}
+        command={displayedTurn?.userInput ?? ""}
         text={narrativeToShow}
         isStreaming={isStreaming}
         isConnecting={isConnecting}

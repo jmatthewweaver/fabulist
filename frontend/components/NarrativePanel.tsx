@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 
 interface Props {
   sceneDescription: string;
+  command: string;
   text: string;
   isStreaming: boolean;
   isConnecting: boolean;
@@ -12,7 +13,7 @@ interface Props {
   onNext: () => void;
 }
 
-export function NarrativePanel({ sceneDescription, text, isStreaming, isConnecting, turnIndex, totalTurns, onPrev, onNext }: Props) {
+export function NarrativePanel({ sceneDescription, command, text, isStreaming, isConnecting, turnIndex, totalTurns, onPrev, onNext }: Props) {
   const canPrev = turnIndex > 0;
   const canNext = turnIndex < totalTurns - 1;
 
@@ -37,10 +38,13 @@ export function NarrativePanel({ sceneDescription, text, isStreaming, isConnecti
                 {sceneDescription}
               </p>
             )}
-            {sceneDescription && text && (
+            {sceneDescription && (command || text) && (
               <hr className="my-3 border-stone-800" />
             )}
             {/* What just happened — the result of your command */}
+            {command && (
+              <p className="text-xs font-mono text-amber-600/80 mb-1.5">&gt; {command}</p>
+            )}
             <p className="narrative-text text-stone-200 whitespace-pre-wrap">
               {text}
               {isStreaming && <span className="animate-pulse text-stone-500">▍</span>}

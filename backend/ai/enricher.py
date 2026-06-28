@@ -42,17 +42,25 @@ IMAGE GUIDANCE: Suggest an image for any visually interesting moment:
 Do NOT suggest images for: failed commands, routine movement with no description.""",
 }
 
-_SYSTEM_TEMPLATE = """You are the narrator for an interactive fiction game. Transform the game's
-terse output into immersive, atmospheric prose.
+_SYSTEM_TEMPLATE = """You are the narrator for an interactive fiction game. Rewrite the game's
+terse output for the player's latest command into clear, immersive prose — WITHOUT changing
+what happened.
 
 Rules:
-1. Never contradict the game's explicit statements — they are ground truth.
-2. Invent sensory details (smell, sound, texture, temperature) that fit the world.
-3. Use the World Bible for tone, style, and period conventions.
-4. If an object's description appears in Established Descriptions, use it verbatim.
-5. Do not mention items or characters not present in the game's output.
-6. Output only narrative prose — no meta-commentary, no score, no inventory lists, no image suggestions.
-7. Keep responses concise (2-4 paragraphs maximum)."""
+1. Faithfully convey the game's output. If it reports a result ("Opened.", "Taken."), narrate
+   that result. If it contains text the player reads or examines (a leaflet, a sign, an
+   inscription, a book), convey that text's ACTUAL content — never replace it with scenery.
+2. Narrate ONLY what the game output describes. Never invent actions the player didn't take,
+   outcomes that didn't happen, or objects/characters not in the output. (If the player only
+   looked, they did not touch anything.)
+3. You may add restrained sensory texture (light, sound, smell) that fits the world, but keep
+   it minimal — the game's actual content comes first, flourish a distant second.
+4. No foreshadowing, no editorializing, no authorial asides or meta-commentary (e.g. "someone
+   expected you", "old money", "frankly").
+5. Do NOT re-describe the whole location each turn — the location is shown to the player
+   separately. Focus on what THIS command did.
+6. Match the World Bible's tone. Output only prose — no score, inventory, or game mechanics.
+7. Be concise: usually ONE short paragraph; never more than two."""
 
 _IMAGE_EXTRACT_SYSTEM = """Given this narrative, determine if an image should be generated.
 If yes, return JSON: {{"suggest": true, "type": "<room_wide|object_closeup|scene_moment|view|inventory_still>", "subject": "<what to depict>", "prompt_hint": "<concise visual description for image generation, ~20 words>"}}
@@ -178,16 +186,20 @@ async def enrich_stream(raw_output: str, bundle: ContextBundle) -> AsyncIterator
 
 _SCENE_SYSTEM = """You are the scene-setter for an interactive fiction game. You are given the
 game's own output describing the player's current surroundings — a LOOK plus EXAMINE of the
-things present. Write ONE vivid, present-tense visual description of the scene: what it looks
-like, for setting the scene and grounding an illustration.
+things present. Write ONE grounded, present-tense visual description of the location AS IT
+CURRENTLY IS, for setting the scene and grounding an illustration.
 
 Rules:
-1. Describe only what the game's output states or directly implies. You may add atmosphere
-   (light, texture, material, mood) but never invent new objects, exits, or facts.
-2. Reflect the current state exactly. If the output says it is dark, the scene is dark. If a
-   thing is closed or absent, do not describe its contents.
-3. Third person, present tense. No second-person "you", no meta-commentary, no game mechanics.
-4. 2-4 sentences.
+1. Describe only what the game's output states or directly implies — never invent new objects,
+   exits, or facts.
+2. Reflect the CURRENT state exactly. If a container is open with something inside, say so; if
+   a door is boarded, say so; if it is dark, the scene is dark. Do not describe a state the
+   output doesn't support (e.g. don't call an opened thing closed).
+3. You may add restrained physical/atmospheric detail (light, material, weather), but NO
+   editorializing, backstory, foreshadowing, or authorial commentary ("old money", "frankly",
+   "as if it expected you", "indifferent to your presence").
+4. Third person, present tense. No second-person "you". Favor concrete visual nouns over mood.
+5. 2-3 plain sentences.
 Output only the description prose."""
 
 
