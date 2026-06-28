@@ -6,6 +6,7 @@ game + location + visible objects + style all match.
 """
 import asyncio
 import hashlib
+import time
 from pathlib import Path
 
 import httpx
@@ -109,7 +110,10 @@ async def generate_scene_image(
     suffix = "_mobile" if mobile else ""
     out_path = _IMAGE_DIR / f"{cache_key}{suffix}.jpg"
     out_path.write_bytes(resp.content)
-    return f"/images/{cache_key}{suffix}.jpg"
+    # Cache-bust: /images/ is served `immutable`, so a regenerated scene at the same
+    # cache_key would otherwise show stale in the browser. A version param tied to
+    # generation time changes the URL on (re)generation while stable images stay cached.
+    return f"/images/{cache_key}{suffix}.jpg?v={int(time.time())}"
 
 
 async def generate_style_seed(

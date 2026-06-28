@@ -6,9 +6,10 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.db import Playthrough, Game
+from ..models.db import Playthrough, Game, Invention
 from ..ai.context_manager import ContextManager
 from ..deps import get_db
 from .auth import decode_jwt
@@ -71,8 +72,10 @@ async def get_playthrough(playthrough_id: str, db: AsyncSession = Depends(get_db
 
 @router.delete("/{playthrough_id}")
 async def delete_playthrough(playthrough_id: str, db: AsyncSession = Depends(get_db)):
+    # Remove dependent inventions first (FK is NOT NULL, so they'd block the delete).
+    await db.execute(sa_delete(Invention).where(Invention.playthrough_id == playthrough_id))
     p = await db.get(Playthrough, playthrough_id)
     if p:
         await db.delete(p)
-        await db.commit()
+    await db.commit()
     return {"ok": True}

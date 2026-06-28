@@ -1,5 +1,5 @@
 "use client";
-import { Camera } from "lucide-react";
+import { Camera, Loader2 } from "lucide-react";
 
 interface Props {
   url: string | null;
@@ -33,9 +33,12 @@ export function SceneImage({ url, loading, roomName, onRequestImage }: Props) {
         <Camera size={15} />
       </button>
 
-      {/* Loading indicator */}
+      {/* Generating overlay — clearly indicates a new image is being produced */}
       {loading && (
-        <div className="absolute top-2 left-2 w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-stone-950/55 backdrop-blur-[1px]">
+          <Loader2 size={24} className="animate-spin text-amber-400" />
+          <span className="text-xs text-stone-300 tracking-wide">Generating scene…</span>
+        </div>
       )}
 
       {/* Room name caption */}

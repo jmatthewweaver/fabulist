@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
+import { Trash2 } from "lucide-react";
 
 interface Playthrough {
   id: string;
@@ -37,6 +38,15 @@ export default function GamePage() {
         setSelectedStyle(data.default_style_id);
       });
   }, [gameId]);
+
+  const deletePlaythrough = async (id: string) => {
+    if (!confirm("Delete this saved game? This can't be undone.")) return;
+    await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/playthroughs/${id}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    setGame((g) => (g ? { ...g, playthroughs: g.playthroughs.filter((p) => p.id !== id) } : g));
+  };
 
   const startNew = async () => {
     setStarting(true);
@@ -74,19 +84,28 @@ export default function GamePage() {
           <h2 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-3">Continue</h2>
           <div className="grid gap-2">
             {(game.playthroughs ?? []).map((p) => (
-              <button
-                key={p.id}
-                onClick={() => router.push(`/play/${p.id}`)}
-                className="flex items-center justify-between p-3 rounded-lg bg-stone-900 hover:bg-stone-800 border border-stone-800 text-left transition-colors"
-              >
-                <div>
-                  <div className="text-sm text-stone-200">{p.current_room ?? "Unknown location"}</div>
-                  <div className="text-xs text-stone-500 mt-0.5">Turn {p.turn_count}</div>
-                </div>
-                <span className="text-xs text-stone-600">
-                  {new Date(p.last_active).toLocaleDateString()}
-                </span>
-              </button>
+              <div key={p.id} className="flex items-stretch gap-2">
+                <button
+                  onClick={() => router.push(`/play/${p.id}`)}
+                  className="flex-1 flex items-center justify-between p-3 rounded-lg bg-stone-900 hover:bg-stone-800 border border-stone-800 text-left transition-colors"
+                >
+                  <div>
+                    <div className="text-sm text-stone-200">{p.current_room ?? "Unknown location"}</div>
+                    <div className="text-xs text-stone-500 mt-0.5">Turn {p.turn_count}</div>
+                  </div>
+                  <span className="text-xs text-stone-600">
+                    {new Date(p.last_active).toLocaleDateString()}
+                  </span>
+                </button>
+                <button
+                  onClick={() => deletePlaythrough(p.id)}
+                  aria-label="Delete saved game"
+                  title="Delete saved game"
+                  className="px-3 rounded-lg bg-stone-900 hover:bg-red-950 border border-stone-800 text-stone-500 hover:text-red-400 transition-colors"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
             ))}
           </div>
         </section>
