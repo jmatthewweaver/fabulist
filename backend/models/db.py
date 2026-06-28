@@ -99,6 +99,20 @@ class Invention(Base):
     )
 
 
+class VisualGuide(Base):
+    """
+    Accumulating visual-continuity guide per (game, style): a global look (medium, palette,
+    lighting, weather) plus canonical appearances of recurring entities (buildings, landscape,
+    characters). Built by analyzing each generated location image and used to augment prompts
+    for newly-rendered locations so the whole game looks consistent.
+    """
+    __tablename__ = "visual_guides"
+    game_id = Column(String, ForeignKey("games.id"), primary_key=True)
+    style_id = Column(String, primary_key=True, default="default")
+    doc = Column(JSONB, default=dict)            # {"style": str, "entities": {name: desc}}
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CachedScene(Base):
     """
     Game-global cache of a rendered scene, keyed by the hash of the game's own

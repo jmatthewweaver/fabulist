@@ -37,9 +37,10 @@ log = logging.getLogger(__name__)
 from ..deps import AsyncSessionLocal
 from ..ai.command_translator import translate
 from ..ai.context_manager import ContextManager, Turn
-from ..ai.enricher import describe_scene
+from ..ai.enricher import describe_scene, describe_edit
+from ..ai.visual_continuity import augment_prompt, analyze_image
 from ..config import settings
-from ..models.db import Playthrough, Game, CachedScene
+from ..models.db import Playthrough, Game, CachedScene, VisualGuide
 from ..game.dfrotz import run_one_turn, observe_scene
 from ..media.image_generator import make_cache_key, generate_scene_image
 
@@ -138,14 +139,32 @@ async def _render_scene(
 
             # Stable seed per (game, style, location) backs up the reference for consistency.
             seed = int(hashlib.sha256(f"{game_id}|{style_id}|{room}".encode()).hexdigest()[:8], 16)
-            url = await generate_scene_image(
-                scene_prompt=description,
-                style_prefix=style_prefix,
-                style_negative="",
-                cache_key=scene_key,
-                seed=seed,
-                reference_image_b64=ref_b64,
-            )
+            guide: dict = {}
+
+            if ref_b64 and ref.scene_description:
+                # Edit from the anchor with a FOCUSED change instruction (the delta), not a
+                # full re-description — full prompts make flux re-render and drift (e.g.
+                # un-board the door). A cheap Haiku call computes what actually changed.
+                edit = (await describe_edit(ref.scene_description, description)).strip()
+                if edit.lower().startswith("no change"):
+                    log.info("scene edit: room=%r no visual change — reusing anchor image", room)
+                    url = ref.image_url
+                else:
+                    log.info("scene edit: room=%r delta=%r", room, edit[:100])
+                    url = await generate_scene_image(
+                        scene_prompt=edit, style_prefix=style_prefix, style_negative="",
+                        cache_key=scene_key, seed=seed, reference_image_b64=ref_b64,
+                    )
+            else:
+                # First image for this location (the anchor): augment the prompt against the
+                # running visual guide so a new location matches the established look + objects.
+                vg = await db.get(VisualGuide, (game_id, style_id))
+                guide = vg.doc if vg else {}
+                prompt = await augment_prompt(description, guide)
+                url = await generate_scene_image(
+                    scene_prompt=prompt, style_prefix=style_prefix, style_negative="",
+                    cache_key=scene_key, seed=seed, reference_image_b64=None,
+                )
 
             row = cached or CachedScene(cache_key=scene_key, game_id=game_id, style_id=style_id)
             row.room = room
@@ -155,6 +174,29 @@ async def _render_scene(
             await db.commit()
 
             await websocket.send_json({"type": "image_ready", "subject": room, "url": url})
+
+            # Anchor renders: learn from the IMAGE flux actually drew and fold it into the
+            # guide so later locations stay consistent. After image_ready, so it's off the
+            # user's critical path.
+            if not ref_b64:
+                try:
+                    img_bytes = (Path(settings.images_dir) / f"{scene_key}.jpg").read_bytes()
+                    updated = await analyze_image(img_bytes, description, guide)
+                    existing = await db.get(VisualGuide, (game_id, style_id))
+                    if existing:
+                        cur = existing.doc or {}
+                        existing.doc = {
+                            "style": cur.get("style") or updated.get("style") or "",
+                            "entities": {**(cur.get("entities") or {}), **(updated.get("entities") or {})},
+                        }
+                        existing.updated_at = datetime.utcnow()
+                    else:
+                        db.add(VisualGuide(game_id=game_id, style_id=style_id, doc=updated))
+                    await db.commit()
+                    log.info("visual guide updated from room=%r (%d entities)",
+                             room, len((updated.get("entities") or {})))
+                except Exception:
+                    log.warning("visual guide update failed for room=%r", room, exc_info=True)
     except Exception:
         log.exception("Scene render failed: game=%s room=%r", game_id, room)
 

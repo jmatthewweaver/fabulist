@@ -188,7 +188,9 @@ def do_ingest(fn: str) -> str:
 def do_clear_cache() -> str:
     steps: list[str] = []
     if DATABASE_URL:
-        steps.append("DELETE cached_scenes:\n" + run_cmd(["psql", _libpq_url(), "-c", "DELETE FROM cached_scenes;"], str(REPO_DIR)))
+        steps.append("DELETE cached_scenes + visual_guides:\n" + run_cmd(
+            ["psql", _libpq_url(), "-c", "DELETE FROM cached_scenes; DELETE FROM visual_guides;"],
+            str(REPO_DIR)))
     else:
         steps.append("(DATABASE_URL not set — skipped DB delete)")
     removed = 0

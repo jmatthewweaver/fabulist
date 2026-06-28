@@ -192,14 +192,18 @@ CURRENTLY IS, for setting the scene and grounding an illustration.
 Rules:
 1. Describe only what the game's output states or directly implies — never invent new objects,
    exits, or facts.
-2. Reflect the CURRENT state exactly. If a container is open with something inside, say so; if
+2. Describe only what IS present. NEVER state the absence of something ("there is no door",
+   "nothing here", "no exit") — image generators draw negated objects anyway. Rephrase
+   affirmatively: "the wall is solid, lined only with boarded-over windows" instead of "there
+   is no door here."
+3. Reflect the CURRENT state exactly. If a container is open with something inside, say so; if
    a door is boarded, say so; if it is dark, the scene is dark. Do not describe a state the
    output doesn't support (e.g. don't call an opened thing closed).
-3. You may add restrained physical/atmospheric detail (light, material, weather), but NO
+4. You may add restrained physical/atmospheric detail (light, material, weather), but NO
    editorializing, backstory, foreshadowing, or authorial commentary ("old money", "frankly",
    "as if it expected you", "indifferent to your presence").
-4. Third person, present tense. No second-person "you". Favor concrete visual nouns over mood.
-5. 2-3 plain sentences.
+5. Third person, present tense. No second-person "you". Favor concrete visual nouns over mood.
+6. 2-3 plain sentences.
 Output only the description prose."""
 
 
@@ -216,6 +220,37 @@ async def describe_scene(scene_output: str, world_bible: dict | str) -> str:
         max_tokens=400,
         system=_SCENE_SYSTEM,
         messages=[{"role": "user", "content": user}],
+    )
+    return response.content[0].text.strip()
+
+
+_EDIT_SYSTEM = """You are given a REFERENCE description and the CURRENT description of the SAME
+location in a game. Output a single short imperative instruction describing ONLY what visibly
+changed, to apply as an edit to the reference image.
+
+Rules:
+- Mention only the changed objects and their new state. Do NOT restate anything unchanged.
+- Phrase affirmatively — say what IS there, never what is absent ("the mailbox is empty", not
+  "the leaflet is gone").
+- If nothing that would be visible in an image changed, output exactly: no change
+Examples:
+  ref "a closed mailbox", current "an open mailbox with a leaflet inside" -> "Open the mailbox; a leaflet sits inside it."
+  ref "an open mailbox with a leaflet", current "an open, empty mailbox" -> "The open mailbox is now empty."
+Output only the instruction, nothing else."""
+
+
+async def describe_edit(reference_description: str, current_description: str) -> str:
+    """
+    Compute the focused visual change from a location's reference scene to its current
+    state. FLUX.2 editing drifts far less when given a small change instruction than a full
+    re-description. Returns "no change" when nothing visible differs.
+    """
+    response = await _client.messages.create(
+        model=settings.model_translation,   # Haiku — cheap
+        max_tokens=120,
+        system=_EDIT_SYSTEM,
+        messages=[{"role": "user",
+                   "content": f"REFERENCE:\n{reference_description}\n\nCURRENT:\n{current_description}"}],
     )
     return response.content[0].text.strip()
 
