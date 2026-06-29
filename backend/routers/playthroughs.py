@@ -57,9 +57,11 @@ async def create_playthrough(
 
 
 @router.get("/{playthrough_id}")
-async def get_playthrough(playthrough_id: str, db: AsyncSession = Depends(get_db)):
+async def get_playthrough(playthrough_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = _get_user_id(request)
     p = await db.get(Playthrough, playthrough_id)
-    if not p:
+    # 404 (not 403) when it isn't the caller's — don't leak that the id exists.
+    if not p or p.user_id != user_id:
         raise HTTPException(404)
     return {
         "id": p.id,
@@ -71,11 +73,13 @@ async def get_playthrough(playthrough_id: str, db: AsyncSession = Depends(get_db
 
 
 @router.delete("/{playthrough_id}")
-async def delete_playthrough(playthrough_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_playthrough(playthrough_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = _get_user_id(request)
+    p = await db.get(Playthrough, playthrough_id)
+    if not p or p.user_id != user_id:
+        raise HTTPException(404)
     # Remove dependent inventions first (FK is NOT NULL, so they'd block the delete).
     await db.execute(sa_delete(Invention).where(Invention.playthrough_id == playthrough_id))
-    p = await db.get(Playthrough, playthrough_id)
-    if p:
-        await db.delete(p)
+    await db.delete(p)
     await db.commit()
     return {"ok": True}

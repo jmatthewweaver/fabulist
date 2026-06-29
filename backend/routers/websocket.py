@@ -35,30 +35,46 @@ from sqlalchemy import select
 log = logging.getLogger(__name__)
 
 from ..deps import AsyncSessionLocal
+from .auth import decode_jwt
 from ..ai.command_translator import translate
 from ..ai.context_manager import ContextManager, Turn
 from ..ai.enricher import describe_scene, describe_edit
 from ..ai.visual_continuity import augment_prompt, analyze_image
 from ..config import settings
 from ..models.db import Playthrough, Game, CachedScene, VisualGuide
-from ..game.dfrotz import run_one_turn, observe_scene
+from ..game.dfrotz import run_one_turn, observe_scene, read_game_status
 from ..media.image_generator import make_cache_key, generate_scene_image
 
 router = APIRouter()
 
 
-def _extract_new_room(raw_text: str) -> str | None:
+def _extract_new_room(raw_text: str, known_rooms: set[str] | None = None) -> str | None:
     """
     If raw output leads with a room title header, return it.
-    Room names are short, start with a capital, and don't end with sentence punctuation.
+
+    When we know the game's room names (from the object tree), require the leading line to
+    BE one of them — that's robust. Otherwise fall back to a shape heuristic (short, leading
+    capital, no sentence punctuation), which has false positives like "You are carrying:"
+    (the inventory header) that would otherwise be mistaken for a room.
     """
     first_line = raw_text.strip().split("\n")[0].strip()
-    if (first_line
-            and len(first_line) < 60
+    if not first_line:
+        return None
+    if known_rooms:
+        return first_line if first_line.strip().lower() in known_rooms else None
+    if (len(first_line) < 60
             and first_line[0].isupper()
-            and not first_line.endswith((".", "!", "?", ","))):
+            and not first_line.endswith((".", "!", "?", ",", ":"))):
         return first_line
     return None
+
+
+def _known_room_names(world_bible: dict) -> set[str]:
+    """Lowercased names of every node tagged kind='room' in the object tree."""
+    nodes = (world_bible.get("known_objects") or {}).get("nodes") or {}
+    return {n["name"].strip().lower()
+            for n in nodes.values()
+            if n.get("kind") == "room" and n.get("name")}
 
 
 def _room_examine_targets(world_bible: dict, room_name: str) -> list[str]:
@@ -153,9 +169,18 @@ async def _render_scene(
                     url = ref.image_url
                 else:
                     log.info("scene edit: room=%r delta=%r", room, edit[:100])
+                    # Wrap the delta with an explicit preservation clause: FLUX.2's edit pass
+                    # otherwise drifts the whole frame (notably bumping saturation/contrast)
+                    # on every hop. Pinning colour/exposure/composition keeps the edited
+                    # state-variant looking identical to the anchor except for the change.
+                    edit_prompt = (
+                        "Edit the provided image. Keep its composition, framing, colours, "
+                        "lighting, exposure and saturation EXACTLY as they are. Change only "
+                        f"this one thing, leaving everything else untouched: {edit}"
+                    )
                     url = await generate_scene_image(
-                        scene_prompt=edit, style_prefix=style_prefix, style_negative="",
-                        cache_key=scene_key, seed=seed, reference_image_b64=ref_b64,
+                        scene_prompt=edit_prompt, style_prefix=style_prefix, style_negative="",
+                        cache_key=scene_key, seed=seed, reference_image_b64=ref_b64, edit=True,
                     )
             else:
                 # First image for this location (the anchor): augment the prompt against the
@@ -216,6 +241,19 @@ async def play(websocket: WebSocket, playthrough_id: str):
             await websocket.close()
             return
 
+        # Ownership: the WS handshake carries the auth cookie (same origin). Only the owner
+        # may connect — 404-style message, no existence leak.
+        token = websocket.cookies.get("auth_token")
+        try:
+            ws_user_id = decode_jwt(token)["sub"] if token else None
+        except Exception:
+            ws_user_id = None
+        if not ws_user_id or playthrough.user_id != ws_user_id:
+            log.warning("Unauthorized WS for playthrough=%s (user=%s)", playthrough_id, ws_user_id)
+            await websocket.send_json({"type": "error", "message": "Playthrough not found."})
+            await websocket.close()
+            return
+
         game: Game = await db.get(Game, playthrough.game_id)
         game_path = str(settings.games_dir / game.filename)
         log.info("Starting game: %s (turn=%s)", game.title, playthrough.turn_count)
@@ -227,6 +265,7 @@ async def play(websocket: WebSocket, playthrough_id: str):
         vocab_nouns: list = world_bible.get("vocab_nouns", [])
         style_id: str = playthrough.style_id or "default"
         style_prefix: str = ""  # TODO: load from Style record
+        known_rooms: set[str] = _known_room_names(world_bible)
 
         last_scene_key: str | None = None
 
@@ -268,7 +307,7 @@ async def play(websocket: WebSocket, playthrough_id: str):
             await websocket.close()
             return
 
-        opening_room = _extract_new_room(opening.raw_text) or playthrough.current_room or ""
+        opening_room = _extract_new_room(opening.raw_text, known_rooms) or playthrough.current_room or ""
         playthrough.current_room = opening_room
         playthrough.last_active = datetime.utcnow()
         await db.commit()
@@ -278,8 +317,12 @@ async def play(websocket: WebSocket, playthrough_id: str):
         await websocket.send_json({"type": "narrative_chunk", "text": opening.raw_text})
         await websocket.send_json({"type": "narrative_done"})
         log.info("Connect scene: room=%r turn=%s", opening_room, playthrough.turn_count)
+        status = await read_game_status(game_path, playthrough.engine_save, settings.dfrotz_path)
         await websocket.send_json({
-            "type": "game_state", "room": opening_room, "inventory": [], "turn": playthrough.turn_count or 0,
+            "type": "game_state", "room": opening_room, "inventory": [],
+            "turn": playthrough.turn_count or 0,
+            "score": (status or {}).get("score"),
+            "max_score": (status or {}).get("max_score"),
         })
 
         await observe_and_render(opening_room, playthrough.engine_save, dedup=False)
@@ -302,7 +345,20 @@ async def play(websocket: WebSocket, playthrough_id: str):
                     continue
 
                 current_room = playthrough.current_room or "Unknown"
-                visible_objects: list[str] = []
+                # The room's known children/scenery names ground object references.
+                visible_objects: list[str] = _room_examine_targets(world_bible, current_room)
+
+                # Live, non-perturbing LOOK at the PRE-command state so the translator can see
+                # where each exit leads ("To the north a path winds..."), turning "walk down
+                # the path" into a compass direction. Cheap dfrotz spawn; persist=False.
+                surroundings = ""
+                try:
+                    look_result, _ = await run_one_turn(
+                        game_path, "look", playthrough.engine_save, settings.dfrotz_path, persist=False
+                    )
+                    surroundings = look_result.raw_text
+                except Exception:
+                    log.warning("pre-command look failed for playthrough=%s", playthrough_id, exc_info=True)
 
                 # 1. Translate natural language → game command via dfrotz
                 latest_save = playthrough.engine_save
@@ -325,6 +381,7 @@ async def play(websocket: WebSocket, playthrough_id: str):
                         vocab_nouns=vocab_nouns,
                         vocab_index=vocab_index,
                         step_fn=step_fn,
+                        surroundings=surroundings,
                     )
                     log.info("Turn %s: %r → cmd=%r (%d chars)", playthrough.turn_count + 1,
                              user_input, command, len(raw_output))
@@ -344,7 +401,7 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 narrative_text = raw_output
 
                 # 3. Detect room change and persist turn
-                new_room = _extract_new_room(raw_output)
+                new_room = _extract_new_room(raw_output, known_rooms)
                 if new_room:
                     current_room = new_room
 
@@ -364,12 +421,15 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 playthrough.context_json = context.to_json()
                 await db.commit()
 
-                # 4. Send updated game state
+                # 4. Send updated game state (score read non-perturbingly from the new save)
+                status = await read_game_status(game_path, latest_save, settings.dfrotz_path)
                 await websocket.send_json({
                     "type": "game_state",
                     "room": current_room,
                     "inventory": [],
                     "turn": turn_num,
+                    "score": (status or {}).get("score"),
+                    "max_score": (status or {}).get("max_score"),
                 })
 
                 # 5. Observe the current scene; render only if it actually changed.

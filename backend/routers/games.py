@@ -3,7 +3,9 @@ Game library endpoints: list games, get game details + user's playthroughs.
 Also: game ingestion trigger.
 """
 import hashlib
+import json
 import logging
+from datetime import datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -42,7 +44,10 @@ async def list_games(db: AsyncSession = Depends(get_db)):
 @router.get("/{game_id}")
 async def get_game(game_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     token = request.cookies.get("auth_token")
-    user_id = decode_jwt(token)["sub"] if token else None
+    try:
+        user_id = decode_jwt(token)["sub"] if token else None
+    except Exception:
+        user_id = None  # expired/invalid cookie → treat as anonymous, don't 500 the page
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(404, "Game not found")
@@ -125,9 +130,15 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
 
     world_bible_dict = await generate_world_bible(world_data, opening_text, game_path.stem)
     world_bible_dict["known_objects"] = known_objects
+    # Carry the parser vocabulary through to the world bible — the command translator reads
+    # world_bible["vocab_verbs"/"vocab_nouns"] at play time. generate_world_bible only returns
+    # the LLM's prose JSON, so these must be attached here or they arrive empty.
+    world_bible_dict["vocab_verbs"] = world_data.vocab_verbs
+    world_bible_dict["vocab_nouns"] = world_data.vocab_nouns
+    log.info("Vocab: %d verbs, %d dictionary words from %s",
+             len(world_data.vocab_verbs), len(world_data.vocab_nouns), filename)
     vocab_index = build_vocab_index(world_data)
 
-    import json
     game = existing or Game(id=game_id)
     game.title = world_bible_dict.get("title", game_path.stem)
     game.filename = filename
@@ -135,7 +146,7 @@ async def ingest_game(filename: str, db: AsyncSession = Depends(get_db)):
     game.description = world_bible_dict.get("setting", "")
     game.world_bible = json.dumps(world_bible_dict)
     game.vocab_index = json.dumps(vocab_index)
-    game.ingested_at = __import__("datetime").datetime.utcnow()
+    game.ingested_at = datetime.utcnow()
 
     if not existing:
         db.add(game)

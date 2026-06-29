@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import { Trash2 } from "lucide-react";
+import { AuthButton } from "../../../components/AuthButton";
 
 interface Playthrough {
   id: string;
@@ -56,15 +57,29 @@ export default function GamePage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ game_id: gameId, style_id: selectedStyle }),
     });
-    const { id } = await res.json();
-    router.push(`/play/${id}`);
+    // Not signed in → go log in, then come back here (no more /play/undefined).
+    if (res.status === 401) {
+      window.location.href =
+        `${process.env.NEXT_PUBLIC_API_URL}/auth/login?next=${encodeURIComponent(`/games/${gameId}`)}`;
+      return;
+    }
+    const data = res.ok ? await res.json().catch(() => null) : null;
+    if (!data?.id) {
+      setStarting(false);
+      alert("Couldn't start a new game. Please try again.");
+      return;
+    }
+    router.push(`/play/${data.id}`);
   };
 
   if (!game) return <div className="flex items-center justify-center h-screen text-stone-500">Loading...</div>;
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-8">
-      <Link href="/" className="text-stone-500 hover:text-stone-300 text-sm mb-6 block">← All games</Link>
+      <div className="flex items-center justify-between mb-6 gap-4">
+        <Link href="/" className="text-stone-500 hover:text-stone-300 text-sm">← All games</Link>
+        <AuthButton />
+      </div>
 
       <div className="flex gap-5 mb-6">
         {game.icon_image_url ? (

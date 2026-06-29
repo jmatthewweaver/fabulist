@@ -18,9 +18,22 @@ Examples:
   "go north" → {"verb": "go", "noun": "north", "prep": null, "indirect": null}
   "put the key in the box" → {"verb": "put", "noun": "key", "prep": "in", "indirect": "box"}
   "look around" → {"verb": "look", "noun": null, "prep": null, "indirect": null}
-Use only verbs and nouns from the provided vocabulary lists."""
+
+Movement: the parser moves by compass DIRECTION (north/south/east/west/ne/nw/se/sw/up/down/
+in/out) — never by the name of a path or feature. The SURROUNDINGS text names where each exit
+leads. When the user says to walk/go/head toward a described feature (a path, trail, door,
+stairs, opening), find that feature in the surroundings and output the DIRECTION it lies in.
+  surroundings "To the north a narrow path winds through the trees" + "walk down the path"
+    → {"verb": "north", "noun": null, "prep": null, "indirect": null}
+  surroundings "a window opens to the east" + "climb through the window"
+    → {"verb": "east", "noun": null, "prep": null, "indirect": null}
+Prefer the SURROUNDINGS for resolving objects and directions; fall back to the vocabulary
+lists for spelling. Use a bare direction as the verb for movement (noun null)."""
 
 _TRANSLATE_PROMPT = """Current room: {room}
+Surroundings (the game's own current description — use it to resolve directions and objects):
+{surroundings}
+
 Visible objects: {objects}
 Known verbs: {verbs}
 Known nouns (use exact spelling): {nouns}
@@ -69,17 +82,23 @@ async def translate(
     vocab_nouns: list[str],
     vocab_index: dict[str, str],
     step_fn,  # async (command: str) -> StepResult
+    surroundings: str = "",
 ) -> tuple[str, str]:
     """
     Returns (final_command, game_output).
     Raises ValueError if all retries are exhausted.
+
+    `surroundings` is the game's own current room text (a live LOOK), which names where the
+    exits lead — essential for mapping "walk down the path" to a compass direction.
     """
     objects_str = ", ".join(visible_objects) if visible_objects else "none visible"
     verbs_str = ", ".join(vocab_verbs[:40])
     nouns_str = ", ".join(vocab_nouns[:60])
+    surroundings_str = surroundings.strip() or "(not available)"
 
     prompt = _TRANSLATE_PROMPT.format(
         room=room,
+        surroundings=surroundings_str,
         objects=objects_str,
         verbs=verbs_str,
         nouns=nouns_str,
@@ -88,6 +107,7 @@ async def translate(
 
     last_command = None
     last_rejection = None
+    last_output = None
 
     for attempt in range(MAX_RETRIES):
         if attempt == 0:
@@ -126,7 +146,12 @@ async def translate(
 
         last_command = command
         last_rejection = result.raw_text[:200]
+        last_output = result.raw_text
 
-    raise ValueError(
-        f"Could not translate '{user_input}' into a valid game command after {MAX_RETRIES} attempts."
+    # Exhausted: the parser never understood it. Show the game's OWN last response (e.g.
+    # "I don't know the word 'frobozz'.") rather than a generic translation error — it's
+    # honest feedback and lets the player rephrase. Falls back to a message if somehow empty.
+    return (
+        last_command or user_input,
+        last_output or "The game didn't understand that. Try rephrasing.",
     )

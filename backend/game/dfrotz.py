@@ -17,11 +17,28 @@ from .adapter import WorldExtractor, StaticWorldData, StepResult
 
 log = logging.getLogger(__name__)
 
-_REJECTION_PATTERNS = re.compile(
+# The parser did not UNDERSTAND the input at all — a rephrase might work, so the translator
+# should retry. This must NOT match "understood but the action failed" responses ("You can't
+# go that way", "You can't see any peppers here") — those are valid game feedback the player
+# should see verbatim, not something to retry into a generic translation error.
+_NOT_UNDERSTOOD = re.compile(
     r"(i don'?t (understand|know the word)|"
-    r"you can'?t|"
     r"that'?s not a verb|"
     r"i don'?t recognize that|"
+    r"that sentence isn'?t one i recognize|"
+    r"you used the word .* in a way|"
+    r"huh\?|"
+    r"what\?)",
+    re.IGNORECASE,
+)
+
+# An EXAMINE produced no real description of its target (out of scope or concealed). Broader
+# than _NOT_UNDERSTOOD — it also catches "you can't see any X here" — so observe_scene drops
+# these and they don't pollute the scene text (and thus the scene cache key).
+_EXAMINE_MISS = re.compile(
+    r"(you can'?t see|"
+    r"i don'?t (understand|know the word|recognize)|"
+    r"that'?s not (a verb|here)|"
     r"huh\?|"
     r"what\?)",
     re.IGNORECASE,
@@ -103,7 +120,7 @@ async def run_one_turn(
 
         raw_text = _extract_command_output(stdout, has_restore=save_bytes is not None)
         log.info("run_one_turn: got %d chars", len(raw_text))
-        rejected = bool(_REJECTION_PATTERNS.search(raw_text))
+        rejected = bool(_NOT_UNDERSTOOD.search(raw_text))
         result = StepResult(raw_text=raw_text, rejected=rejected)
 
         new_save: bytes | None = None
@@ -122,6 +139,62 @@ async def run_one_turn(
             Path(restore_path).unlink(missing_ok=True)
         if save_path:
             Path(save_path).unlink(missing_ok=True)
+
+
+# "Your score is 10 (total of 350 points), in 12 moves." (the SCORE verb's reply)
+_SCORE_RE = re.compile(r"score (?:is|would be) (\d+)", re.IGNORECASE)
+_MAXSCORE_RE = re.compile(r"total of (\d+)", re.IGNORECASE)
+_MOVES_RE = re.compile(r"in (\d+) (?:move|turn)", re.IGNORECASE)
+
+
+def _parse_status(text: str) -> dict | None:
+    m = _SCORE_RE.search(text)
+    if not m:
+        return None
+    mx = _MAXSCORE_RE.search(text)
+    mv = _MOVES_RE.search(text)
+    return {
+        "score": int(m.group(1)),
+        "max_score": int(mx.group(1)) if mx else None,
+        "moves": int(mv.group(1)) if mv else None,
+    }
+
+
+async def read_game_status(
+    game_path: str,
+    save_bytes: bytes | None,
+    dfrotz_path: str = "dfrotz",
+) -> dict | None:
+    """
+    Non-perturbing read of the game's score/moves via the SCORE verb (restore → score →
+    never save). Returns {score, max_score, moves} or None if the game has no score verb.
+    """
+    restore_path: str | None = None
+    try:
+        lines: list[str] = []
+        if save_bytes is not None:
+            tf = tempfile.NamedTemporaryFile(suffix=".qzl", delete=False)
+            tf.write(save_bytes)
+            tf.close()
+            restore_path = tf.name
+            lines.append(f"restore\n{restore_path}")
+        lines.append("score")
+        lines.append("quit\ny")
+
+        stdin_text = "\n".join(lines) + "\n"
+        loop = asyncio.get_event_loop()
+        try:
+            stdout = await loop.run_in_executor(
+                None, lambda: _run_dfrotz_sync(game_path, stdin_text, dfrotz_path)
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+
+        outputs = _extract_command_outputs(stdout, has_restore=save_bytes is not None, count=1)
+        return _parse_status(outputs[0]) if outputs else None
+    finally:
+        if restore_path:
+            Path(restore_path).unlink(missing_ok=True)
 
 
 def _extract_command_outputs(stdout: str, has_restore: bool, count: int) -> list[str]:
@@ -185,7 +258,7 @@ async def observe_scene(
         for i, text in enumerate(outputs):
             if not text:
                 continue
-            if i > 0 and _REJECTION_PATTERNS.search(text):
+            if i > 0 and _EXAMINE_MISS.search(text):
                 continue        # skip examine of out-of-scope/concealed target
             kept.append(text)
 
@@ -340,14 +413,65 @@ def _parse_object_tree(dump: str) -> dict:
 
 
 def _parse_verbs(dump: str) -> list[str]:
-    section = re.search(r"Grammar:(.+?)(?:\n[A-Z]|\Z)", dump, re.DOTALL)
-    if not section:
+    """
+    Verbs from infodump's '**** Parse tables ****' verb grammar. The section opens with
+    'Verb entries = N' and lists, one verb per entry:
+
+        247. 11 entries, verb = "go", synonyms = "procee", "run", "step", "walk"
+
+    Only lines carrying `verb =` are real verbs — the same section also contains grammar
+    template lines (`[01 00 ..] "go OBJ"`) and a preposition table (`249. "on", ...`), both
+    of which we skip by requiring `verb =`. Words are the game's actual 6-char-truncated
+    parser tokens (e.g. "procee", "destro"), which is exactly what the parser accepts.
+    Returns [] if the section is absent (graceful degrade).
+    """
+    start = dump.find("Verb entries =")
+    if start == -1:
         return []
-    return list(set(re.findall(r'"(\w+)"', section.group(1))))
+    end = dump.find("****", start)          # next banner (Dictionary) ends the section
+    section = dump[start:end] if end != -1 else dump[start:]
+
+    verbs: list[str] = []
+    seen: set[str] = set()
+    for line in section.splitlines():
+        if "verb =" not in line:
+            continue
+        for w in re.findall(r'"([^"]+)"', line):   # head verb + same-line synonyms
+            w = w.strip().lower()
+            if w and not w.startswith("#") and " " not in w and w not in seen:
+                seen.add(w)
+                verbs.append(w)
+    return verbs
+
+
+# A dictionary entry: `[  16] air` / `[  17] air-p` — bracketed index then a padded token.
+_DICT_ENTRY = re.compile(r"\[\s*\d+\]\s+(\S+)")
 
 
 def _parse_nouns(dump: str) -> list[str]:
-    section = re.search(r"Dictionary:(.+?)(?:\n[A-Z]|\Z)", dump, re.DOTALL)
-    if not section:
+    """
+    The game's parser vocabulary from infodump's '**** Dictionary ****' section, laid out
+    several entries per line:
+
+        [   9] a       [  16] air     [  17] air-p   [  19] altar   [  23] answer
+
+    Tokens are unquoted and 6-char truncated. We keep alphabetic words (allowing an internal
+    hyphen) and drop the punctuation/control tokens ($ve, ".", ",", "#comm"). This is the
+    full parser vocabulary (nouns, adjectives, verbs, directions); it grounds the translator
+    and complements the object-name `vocab_index`. Returns [] if the section is absent.
+    """
+    start = dump.find("**** Dictionary ****")
+    if start == -1:
         return []
-    return [w.strip() for w in re.findall(r'"(\w+)"', section.group(1))]
+    body = dump[start + len("**** Dictionary ****"):]
+    end = body.find("****")                 # next banner, if any, ends the section
+    section = body[:end] if end != -1 else body
+
+    words: list[str] = []
+    seen: set[str] = set()
+    for tok in _DICT_ENTRY.findall(section):
+        w = tok.strip().lower()
+        if re.fullmatch(r"[a-z][a-z\-]*", w) and w not in seen:
+            seen.add(w)
+            words.append(w)
+    return words

@@ -4,7 +4,7 @@ Rolling 20-turn window; older turns compressed to episodic summaries by Haiku.
 """
 import json
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import anthropic
 
@@ -27,17 +27,6 @@ class Turn:
     room: str
 
 
-@dataclass
-class ContextBundle:
-    """Everything the enrichment prompt needs."""
-    world_bible: str                          # JSON string, fixed per session
-    current_room: str
-    current_inventory: list[str]
-    recent_turns: list[Turn]
-    episodic_summaries: list[str]
-    relevant_inventions: list[dict]           # from ledger lookup
-
-
 class ContextManager:
     def __init__(self, world_bible: str):
         self.world_bible = world_bible
@@ -48,21 +37,6 @@ class ContextManager:
         if len(self._recent) == WINDOW_SIZE:
             self._compress_oldest()
         self._recent.append(turn)
-
-    def build_bundle(
-        self,
-        current_room: str,
-        current_inventory: list[str],
-        relevant_inventions: list[dict],
-    ) -> ContextBundle:
-        return ContextBundle(
-            world_bible=self.world_bible,
-            current_room=current_room,
-            current_inventory=current_inventory,
-            recent_turns=list(self._recent),
-            episodic_summaries=list(self._summaries),
-            relevant_inventions=relevant_inventions,
-        )
 
     def _compress_oldest(self) -> None:
         """Move the COMPRESS_BATCH oldest turns to a summary."""

@@ -15,8 +15,13 @@ class Settings(BaseSettings):
 
     # Image generation (BFL)
     bfl_api_key: str
-    bfl_model_desktop: str = "flux-2-pro"       # reference image support, best quality
+    bfl_model_desktop: str = "flux-2-pro"       # from-scratch anchors, best quality
     bfl_model_mobile: str = "flux-2-klein-4b"   # fast + cheap for low-res
+    # Within-room state edits use the dedicated EDITING model, which preserves the input
+    # image's pixels and changes only the requested region. flux-2-pro's input_image is
+    # reference-CONDITIONED regeneration (it redraws the whole scene and brightens it ~+50
+    # luminance every pass); Kontext keeps the anchor's exposure/grade and edits in place.
+    bfl_model_edit: str = "flux-kontext-pro"
 
     # Auth
     google_client_id: str
@@ -38,18 +43,15 @@ class Settings(BaseSettings):
     infodump_path: str = "infodump"
     txd_path: str = "txd"
 
-    # Image generation mode:
-    #   conservative = first visit to each room only
-    #   normal       = enricher decides (dramatic moments, first visits, notable examines)
-    #   generous     = enricher decides + object close-ups + views
-    image_mode: str = "normal"
-    image_cooldown_turns: int = 3   # minimum turns between auto-generated images
     force_regen: bool = False       # dev: bypass + overwrite the scene/image cache
 
     # App
     frontend_url: str = "http://localhost:3000"
     debug: bool = False
     log_level: str = "INFO"
+    # SQL statement logging is its own switch — even under debug the per-query echo floods
+    # the logs without being useful. Turn this on only to trace a specific DB problem.
+    db_echo: bool = False
 
     class Config:
         # Absolute so .env loads no matter the working directory (e.g. test scripts

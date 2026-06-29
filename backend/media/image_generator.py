@@ -31,25 +31,28 @@ def make_cache_key(game_id: str, style_id: str, scene_output: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
-async def _submit(prompt: str, width: int, height: int, reference_b64: str | None,
-                  mobile: bool, seed: int | None = None) -> str:
+async def _submit(prompt: str, width: int | None, height: int | None, reference_b64: str | None,
+                  mobile: bool, seed: int | None = None, model: str | None = None) -> str:
     """Submit generation request, return polling_url."""
-    model = settings.bfl_model_mobile if mobile else settings.bfl_model_desktop
-    payload: dict = {
-        "prompt": prompt,
-        "width": width,
-        "height": height,
-    }
+    if model is None:
+        model = settings.bfl_model_mobile if mobile else settings.bfl_model_desktop
+    payload: dict = {"prompt": prompt}
+    # The from-scratch generators take explicit dimensions; the edit model (Kontext) infers
+    # the aspect from the input image, so width/height are omitted there.
+    if width is not None and height is not None:
+        payload["width"] = width
+        payload["height"] = height
     # Deterministic seed keeps a location's state-variants visually consistent
     # (same lighting/weather/composition; only the described details change).
     if seed is not None:
         payload["seed"] = seed
-    # Reference image (base64) anchors a location's look across its state-variants.
-    # FLUX.2's editing input is `input_image` (NOT `image_prompt`, which it ignores):
-    # it keeps the base image — house/field/weather/perspective — and applies only the
-    # prompt's change (e.g. mailbox now open).
+    # Reference image (base64) anchors a location's look across its state-variants. The
+    # edit model treats `input_image` as the base to edit IN PLACE (preserving its pixels,
+    # exposure and grade), changing only what the prompt asks. Force jpeg so the bytes we
+    # save as .jpg are actually jpeg.
     if reference_b64 and not mobile:
         payload["input_image"] = reference_b64
+        payload["output_format"] = "jpeg"
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -94,12 +97,22 @@ async def generate_scene_image(
     mobile: bool = False,
     seed: int | None = None,
     reference_image_b64: str | None = None,
+    edit: bool = False,
 ) -> str:
-    """Generate image, save locally, return local URL path."""
-    width, height = (512, 384) if mobile else (1024, 768)
+    """Generate image, save locally, return local URL path.
+
+    edit=True routes to the pixel-preserving edit model (Kontext) and lets it keep the
+    reference image's dimensions; otherwise we generate from scratch at a fixed size.
+    """
+    if edit:
+        model = settings.bfl_model_edit
+        width = height = None       # Kontext infers aspect from the input image
+    else:
+        model = None                # _submit picks the mobile/desktop generator
+        width, height = (512, 384) if mobile else (1024, 768)
     full_prompt = f"{style_prefix} {scene_prompt}".strip()
 
-    polling_url = await _submit(full_prompt, width, height, reference_image_b64, mobile, seed)
+    polling_url = await _submit(full_prompt, width, height, reference_image_b64, mobile, seed, model)
     bfl_url = await _poll(polling_url)
 
     # Download and store permanently
@@ -116,43 +129,3 @@ async def generate_scene_image(
     return f"/images/{cache_key}{suffix}.jpg?v={int(time.time())}"
 
 
-async def generate_style_seed(
-    game_title: str,
-    opening_description: str,
-    style_prefix: str,
-    style_id: str,
-) -> str:
-    """Generate the establishing shot used as style reference for all session images."""
-    prompt = f"{style_prefix} {opening_description[:200]}. Title: {game_title}."
-    seed_key = f"seed_{style_id}_{hashlib.sha256(game_title.encode()).hexdigest()[:8]}"
-    return await generate_scene_image(
-        scene_prompt=prompt,
-        style_prefix="",
-        style_negative="",
-        cache_key=seed_key,
-    )
-
-
-def build_scene_prompt(
-    room_name: str,
-    room_description: str,
-    visible_objects: list[str],
-    relevant_inventions: list[dict],
-    world_bible: dict,
-) -> str:
-    """Assemble the image prompt from game state + world knowledge."""
-    palette = world_bible.get("sensory_palette", {})
-    atmosphere = ", ".join(palette.get("sight", [])[:3])
-    objects_desc = ", ".join(visible_objects[:6]) if visible_objects else ""
-    inventions_context = "; ".join(i["canonical_text"][:80] for i in relevant_inventions[:3])
-
-    parts = [room_name]
-    if room_description:
-        parts.append(room_description[:200])
-    if objects_desc:
-        parts.append(f"containing {objects_desc}")
-    if atmosphere:
-        parts.append(atmosphere)
-    if inventions_context:
-        parts.append(inventions_context)
-    return ". ".join(parts)

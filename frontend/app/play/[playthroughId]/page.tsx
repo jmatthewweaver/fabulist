@@ -23,6 +23,9 @@ export default function PlayPage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
   const [currentRoom, setCurrentRoom] = useState("");
+  const [turn, setTurn] = useState(0);
+  const [score, setScore] = useState<number | null>(null);
+  const [maxScore, setMaxScore] = useState<number | null>(null);
   const [sceneDescription, setSceneDescription] = useState("");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
@@ -72,6 +75,9 @@ export default function PlayPage() {
         }
         case "game_state":
           setCurrentRoom(msg.room);
+          if (typeof msg.turn === "number") setTurn(msg.turn);
+          setScore(typeof msg.score === "number" ? msg.score : null);
+          setMaxScore(typeof msg.max_score === "number" ? msg.max_score : null);
           break;
         case "scene_description":
           setSceneDescription(msg.description || "");
@@ -115,6 +121,15 @@ export default function PlayPage() {
 
   return (
     <div className="flex flex-col h-[100dvh] max-w-lg mx-auto">
+      <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs border-b border-stone-800 bg-stone-950 shrink-0">
+        <span className="truncate text-stone-300">{currentRoom || "…"}</span>
+        <span className="flex gap-3 tabular-nums text-stone-400 shrink-0">
+          <span>Turn {turn}</span>
+          {score !== null && (
+            <span>Score {score}{maxScore ? ` / ${maxScore}` : ""}</span>
+          )}
+        </span>
+      </div>
       <SceneImage url={imageUrl} loading={imageLoading} roomName={currentRoom} onRequestImage={requestImage} />
       <NarrativePanel
         sceneDescription={sceneDescription}

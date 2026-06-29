@@ -32,7 +32,9 @@ import glob
 import hashlib
 import hmac
 import html
+import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -42,7 +44,9 @@ from pathlib import Path
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+)
 
 
 # --------------------------------------------------------------------------- config
@@ -149,6 +153,33 @@ def _libpq_url() -> str:
     return DATABASE_URL.replace("+asyncpg", "")
 
 
+def psql(sql: str) -> str:
+    """Run a query and return raw text (tuples-only, unaligned). '' if no DB configured."""
+    if not DATABASE_URL:
+        return ""
+    return run_cmd(["psql", _libpq_url(), "-t", "-A", "-c", sql], str(REPO_DIR)).strip()
+
+
+def psql_json(sql: str):
+    """Run a query whose single value is JSON; return the parsed object (or None)."""
+    raw = psql(sql)
+    if not raw or raw.startswith("error:"):
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _safe_id(s: str) -> str:
+    """Game ids / cache keys are hex-ish; allow only those chars to keep SQL/paths safe."""
+    return s if re.fullmatch(r"[A-Za-z0-9_-]+", s or "") else ""
+
+
+def esc(s) -> str:
+    return html.escape(str(s if s is not None else ""))
+
+
 # ------------------------------------------------------------------------------- auth
 def _token() -> str:
     return hmac.new(SECRET.encode(), ADMIN_USER.encode(), hashlib.sha256).hexdigest()
@@ -218,6 +249,13 @@ pre{background:#0c0a09;padding:12px;border-radius:8px;overflow:auto;font-size:12
 white-space:pre-wrap;word-break:break-word;max-height:68vh}.badge{display:inline-block;
 padding:3px 10px;border-radius:999px;font-size:12px}.up{background:#14532d}.down{background:#7f1d1d}
 .row{display:flex;gap:8px}.row form{flex:1}a{color:#93c5fd}
+.dim{color:#a8a29e;font-size:13px}.key{color:#57534e;font-size:11px;word-break:break-all}
+details{background:#0c0a09;border-radius:8px;padding:8px 12px;margin:6px 0}
+details summary{cursor:pointer;font-weight:600}details>div{margin-top:6px}
+.scene{background:#0c0a09;border-radius:10px;padding:10px;margin:10px 0;display:flex;gap:10px}
+.thumb{width:120px;height:90px;object-fit:cover;border-radius:6px;flex-shrink:0;background:#1c1917}
+.scene .meta{min-width:0}.gamecard{display:block;background:#0c0a09;border-radius:10px;padding:12px;margin:8px 0;text-decoration:none;color:#e7e5e4}
+.pill{display:inline-block;background:#292524;border-radius:6px;padding:2px 8px;margin:2px 4px 2px 0;font-size:12px}
 """
 
 
@@ -298,6 +336,9 @@ def dashboard(request: Request):
     <a class=btn href=/logs/backend>📜 Backend logs</a>
     <a class=btn href=/logs/frontend>📜 Frontend logs</a>
 
+    <h2>Inspect</h2>
+    <a class=btn href=/inspect>🔎 Ingested data &amp; cached scenes</a>
+
     <h2>Game</h2>
     <form method=post action=/action/ingest onsubmit="return confirm('Re-ingest (clears the world bible first)?')">
       <input name=filename value="{html.escape(GAME_FILENAME)}">
@@ -370,6 +411,139 @@ def logs(service: str, request: Request, auto: int = 0):
     return page(f"{service} logs", body, auto=auto)
 
 
+# ---------------------------------------------------------------------------- inspect
+_INSPECT_GAMES_SQL = """
+SELECT json_agg(json_build_object(
+  'id', id, 'title', title, 'filename', filename,
+  'ingested', to_char(ingested_at, 'YYYY-MM-DD HH24:MI'),
+  'verbs', jsonb_array_length(COALESCE(world_bible->'vocab_verbs', '[]'::jsonb)),
+  'nouns', jsonb_array_length(COALESCE(world_bible->'vocab_nouns', '[]'::jsonb)),
+  'scenes', (SELECT count(*) FROM cached_scenes c WHERE c.game_id = games.id)
+) ORDER BY title) FROM games;
+"""
+
+
+@app.get("/inspect")
+def inspect_index(request: Request):
+    if (g := guard(request)):
+        return g
+    if not DATABASE_URL:
+        return result("Inspect", "DATABASE_URL not set — inspector unavailable.")
+    games = psql_json(_INSPECT_GAMES_SQL) or []
+    cards = []
+    for gm in games:
+        gid = esc(gm["id"])
+        cards.append(
+            f"<div class=gamecard><b>{esc(gm['title'])}</b>"
+            f"<div class=dim>{esc(gm['filename'])} · ingested {esc(gm['ingested'])}</div>"
+            f"<div style='margin:6px 0'>{esc(gm['verbs'])} verbs · {esc(gm['nouns'])} nouns "
+            f"· {esc(gm['scenes'])} cached scenes</div>"
+            f"<a class=btn href=/inspect/game/{gid}>📖 World bible</a>"
+            f"<a class=btn href=/inspect/scenes/{gid}>🖼 Cached scenes</a></div>"
+        )
+    body = ("<h1>🔎 Inspect</h1>" + ("".join(cards) or "<p class=dim>No games ingested.</p>")
+            + "<a class=btn href=/>← back</a>")
+    return page("Inspect", body)
+
+
+def _render_world_bible(wb: dict) -> str:
+    verbs = wb.get("vocab_verbs") or []
+    nouns = wb.get("vocab_nouns") or []
+    ko = (wb.get("known_objects") or {})
+    nodes = ko.get("nodes") or {}
+    rooms = sorted((n for n in nodes.values() if n.get("kind") == "room"),
+                   key=lambda n: (n.get("name") or "").lower())
+
+    out = [f"<h2>Vocab</h2><p>{len(verbs)} verbs · {len(nouns)} dictionary words</p>",
+           f"<p class=dim><b>verbs:</b> {esc(', '.join(verbs[:80]))}</p>",
+           f"<p class=dim><b>nouns:</b> {esc(', '.join(nouns[:80]))}</p>",
+           f"<h2>Object tree — {len(rooms)} rooms</h2>"]
+    for r in rooms:
+        kids = [nodes[str(c)]["name"] for c in r.get("children", []) if str(c) in nodes]
+        scen = [nodes[str(s)]["name"] for s in r.get("scenery", []) if str(s) in nodes]
+        block = [f"<details><summary>{esc(r.get('name'))} "
+                 f"<span class=key>#{esc(r.get('id'))}</span></summary>"]
+        if r.get("description"):
+            block.append(f"<div class=dim>{esc(r['description'])}</div>")
+        if kids:
+            block.append("<div><b>contains</b> "
+                         + "".join(f"<span class=pill>{esc(k)}</span>" for k in kids) + "</div>")
+        if scen:
+            block.append("<div><b>scenery</b> "
+                         + "".join(f"<span class=pill>{esc(s)}</span>" for s in scen) + "</div>")
+        block.append("</details>")
+        out.append("".join(block))
+    return "".join(out)
+
+
+@app.get("/inspect/game/{gid}")
+def inspect_game(gid: str, request: Request):
+    if (g := guard(request)):
+        return g
+    gid = _safe_id(gid)
+    if not gid:
+        return result("Inspect", "bad game id")
+    wb = psql_json(f"SELECT world_bible FROM games WHERE id = '{gid}';")
+    if wb is None:
+        return result("Inspect", "game not found or world_bible empty (mid-reingest?)")
+
+    guide = psql_json(f"SELECT doc FROM visual_guides WHERE game_id = '{gid}' ORDER BY style_id LIMIT 1;")
+    guide_html = ""
+    if guide:
+        ents = (guide.get("entities") or {})
+        guide_html = ("<h2>Visual guide</h2>"
+                      f"<p class=dim>{esc(guide.get('style') or '(no style yet)')}</p>"
+                      + "".join(f"<div><b>{esc(n)}</b> <span class=dim>{esc(d)}</span></div>"
+                                for n, d in ents.items()))
+
+    body = (f"<h1>{esc(wb.get('title') or gid)}</h1>"
+            + _render_world_bible(wb) + guide_html
+            + f"<a class=btn href=/inspect/scenes/{gid}>🖼 Cached scenes</a>"
+            + "<a class=btn href=/inspect>← all games</a>")
+    return page("World bible", body)
+
+
+@app.get("/inspect/scenes/{gid}")
+def inspect_scenes(gid: str, request: Request):
+    if (g := guard(request)):
+        return g
+    gid = _safe_id(gid)
+    if not gid:
+        return result("Inspect", "bad game id")
+    scenes = psql_json(
+        "SELECT json_agg(json_build_object("
+        "'key', cache_key, 'room', room, 'desc', scene_description, "
+        "'created', to_char(created_at, 'MM-DD HH24:MI')) ORDER BY room, created_at) "
+        f"FROM cached_scenes WHERE game_id = '{gid}';"
+    ) or []
+    cards = []
+    for s in scenes:
+        cards.append(
+            f"<div class=scene><img class=thumb loading=lazy src=/inspect/img/{esc(s['key'])} alt=''>"
+            f"<div class=meta><b>{esc(s['room'] or '?')}</b> <span class=dim>{esc(s['created'])}</span>"
+            f"<div class=dim>{esc(s['desc'] or '')}</div>"
+            f"<div class=key>{esc(s['key'])}</div></div></div>"
+        )
+    body = (f"<h1>Cached scenes ({len(scenes)})</h1>"
+            + ("".join(cards) or "<p class=dim>No cached scenes for this game.</p>")
+            + f"<a class=btn href=/inspect/game/{gid}>📖 World bible</a>"
+            + "<a class=btn href=/inspect>← all games</a>")
+    return page("Cached scenes", body)
+
+
+@app.get("/inspect/img/{key}")
+def inspect_img(key: str, request: Request):
+    if (g := guard(request)):
+        return g
+    key = _safe_id(key)
+    if not key:
+        return PlainTextResponse("bad key", status_code=400)
+    p = Path(IMAGES_DIR) / f"{key}.jpg"
+    if not p.exists():
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(str(p), media_type="image/jpeg")
+
+
 # --------------------------------------------------------------- token API (for tools)
 # Auth with the ADMIN_API_KEY via the `X-Admin-Key` header or `?key=` query param. Lets a
 # client (or assistant) fetch logs/status and trigger actions without the browser login.
@@ -428,6 +602,34 @@ def api_clear_cache(request: Request):
     if not has_api_key(request):
         return _deny()
     return PlainTextResponse(do_clear_cache())
+
+
+@app.get("/api/inspect/games")
+def api_inspect_games(request: Request):
+    if not has_api_key(request):
+        return _deny()
+    return JSONResponse(psql_json(_INSPECT_GAMES_SQL) or [])
+
+
+@app.get("/api/inspect/world/{gid}")
+def api_inspect_world(gid: str, request: Request):
+    if not has_api_key(request):
+        return _deny()
+    gid = _safe_id(gid)
+    return JSONResponse(psql_json(f"SELECT world_bible FROM games WHERE id = '{gid}';") or {})
+
+
+@app.get("/api/inspect/scenes/{gid}")
+def api_inspect_scenes(gid: str, request: Request):
+    if not has_api_key(request):
+        return _deny()
+    gid = _safe_id(gid)
+    return JSONResponse(psql_json(
+        "SELECT json_agg(json_build_object('key', cache_key, 'room', room, "
+        "'desc', scene_description, 'image_url', image_url, "
+        "'created', to_char(created_at, 'YYYY-MM-DD HH24:MI')) ORDER BY room, created_at) "
+        f"FROM cached_scenes WHERE game_id = '{gid}';"
+    ) or [])
 
 
 if __name__ == "__main__":

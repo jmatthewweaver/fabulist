@@ -1,5 +1,6 @@
 // Screen 1: Game List
 import Link from "next/link";
+import { AuthButton } from "../components/AuthButton";
 
 async function getGames() {
   const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/games`, {
@@ -15,8 +16,13 @@ export default async function GameListPage() {
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-8">
-      <h1 className="text-3xl font-serif text-stone-100 mb-2">Fabulist</h1>
-      <p className="text-stone-400 text-sm mb-8">AI-augmented interactive fiction</p>
+      <div className="flex items-start justify-between mb-8 gap-4">
+        <div>
+          <h1 className="text-3xl font-serif text-stone-100 mb-2">Fabulist</h1>
+          <p className="text-stone-400 text-sm">AI-augmented interactive fiction</p>
+        </div>
+        <AuthButton />
+      </div>
 
       {games.length === 0 ? (
         <p className="text-stone-500 text-sm">No games ingested yet. Add .z5 or .z8 files to the games/ directory and run ingestion.</p>
