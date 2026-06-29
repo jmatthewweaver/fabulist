@@ -69,9 +69,9 @@ async def _seed_styles():
             return
         db.add(Style(
             id="default",
-            name="Storybook Vector",
-            description="Flat vector storybook illustrations — bold shapes, limited palette, paper grain.",
-            flux_prompt_prefix="flat vector illustration, simple bold shapes, limited flat color palette, subtle paper-grain texture, clean modern storybook style,",
+            name="Storybook Animation",
+            description="Hand-drawn 2D animation — inked outlines, painted backgrounds, warm fantasy mood.",
+            flux_prompt_prefix="hand-drawn 2D animation cel, bold ink outlines, painted storybook backgrounds, rich saturated color, soft cinematic lighting, whimsical dark-fantasy mood,",
             flux_negative_prompt="photorealistic, 3d render, photograph",
             tone_instructions="Enrich descriptions with vivid sensory detail and a sense of wonder.",
         ))

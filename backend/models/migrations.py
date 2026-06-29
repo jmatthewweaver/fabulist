@@ -59,18 +59,22 @@ _DDL = [
     # cached_scenes gained a `room` column (location reference image lookup)
     "ALTER TABLE IF EXISTS cached_scenes ADD COLUMN IF NOT EXISTS room VARCHAR",
 
-    # Switch the default style from the (never-loaded) oil-painting prefix to a flat-vector
-    # storybook look. Guarded on the original seed value so it runs once and never clobbers a
-    # later hand-edited prefix. Clear cached_scenes + visual_guides afterwards so renders and
-    # the visual guide rebuild against the new medium.
+    # Set the default style's look. Guarded on the set of auto-managed prefixes we've shipped
+    # (the original oil-painting seed, then flat-vector) so it upgrades an existing default to
+    # the current choice and runs at most once per value — never clobbering a hand-edited
+    # prefix. When changing the style again, add the prior value to this IN list. Clear
+    # cached_scenes + visual_guides afterwards so renders and the guide rebuild against it.
     """
     UPDATE styles
-    SET flux_prompt_prefix = 'flat vector illustration, simple bold shapes, limited flat color palette, subtle paper-grain texture, clean modern storybook style,',
+    SET flux_prompt_prefix = 'hand-drawn 2D animation cel, bold ink outlines, painted storybook backgrounds, rich saturated color, soft cinematic lighting, whimsical dark-fantasy mood,',
         flux_negative_prompt = 'photorealistic, 3d render, photograph',
-        name = 'Storybook Vector',
-        description = 'Flat vector storybook illustrations — bold shapes, limited palette, paper grain.'
+        name = 'Storybook Animation',
+        description = 'Hand-drawn 2D animation — inked outlines, painted backgrounds, warm fantasy mood.'
     WHERE id = 'default'
-      AND flux_prompt_prefix = 'detailed oil painting, fantasy book illustration, warm lighting,'
+      AND flux_prompt_prefix IN (
+        'detailed oil painting, fantasy book illustration, warm lighting,',
+        'flat vector illustration, simple bold shapes, limited flat color palette, subtle paper-grain texture, clean modern storybook style,'
+      )
     """,
 ]
 
