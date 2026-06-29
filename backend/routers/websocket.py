@@ -41,7 +41,7 @@ from ..ai.context_manager import ContextManager, Turn
 from ..ai.enricher import describe_scene, describe_edit
 from ..ai.visual_continuity import augment_prompt, analyze_image
 from ..config import settings
-from ..models.db import Playthrough, Game, CachedScene, VisualGuide
+from ..models.db import Playthrough, Game, CachedScene, VisualGuide, Style
 from ..game.dfrotz import run_one_turn, observe_scene, read_game_status
 from ..media.image_generator import make_cache_key, generate_scene_image
 
@@ -264,7 +264,11 @@ async def play(websocket: WebSocket, playthrough_id: str):
         vocab_verbs: list = world_bible.get("vocab_verbs", [])
         vocab_nouns: list = world_bible.get("vocab_nouns", [])
         style_id: str = playthrough.style_id or "default"
-        style_prefix: str = ""  # TODO: load from Style record
+        # The authored FLUX prefix carries the game's look (medium, palette) into every render.
+        # Without it the model defaults to photoreal and leans on the seed for cross-room
+        # consistency — which is what dragged the white house into open-composition scenes.
+        style_row = await db.get(Style, style_id)
+        style_prefix: str = (style_row.flux_prompt_prefix if style_row else "") or ""
         known_rooms: set[str] = _known_room_names(world_bible)
 
         last_scene_key: str | None = None

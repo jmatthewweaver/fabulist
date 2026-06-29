@@ -38,7 +38,11 @@ Rules:
    editorializing, backstory, foreshadowing, or authorial commentary ("old money", "frankly",
    "as if it expected you", "indifferent to your presence").
 5. Third person, present tense. No second-person "you". Favor concrete visual nouns over mood.
-6. 2-3 plain sentences.
+6. The viewpoint IS the player's own eyes — an empty vantage, not a scene with the player in
+   it. NEVER introduce a person, figure, observer, or silhouette that the game output does not
+   name (e.g. don't add "a figure perches in the tree" for a room the player is simply standing
+   in). Still depict characters the output explicitly mentions — a thief, a troll, a gnome.
+7. 2-3 plain sentences.
 Output only the description prose."""
 
 

@@ -58,6 +58,20 @@ _DDL = [
 
     # cached_scenes gained a `room` column (location reference image lookup)
     "ALTER TABLE IF EXISTS cached_scenes ADD COLUMN IF NOT EXISTS room VARCHAR",
+
+    # Switch the default style from the (never-loaded) oil-painting prefix to a flat-vector
+    # storybook look. Guarded on the original seed value so it runs once and never clobbers a
+    # later hand-edited prefix. Clear cached_scenes + visual_guides afterwards so renders and
+    # the visual guide rebuild against the new medium.
+    """
+    UPDATE styles
+    SET flux_prompt_prefix = 'flat vector illustration, simple bold shapes, limited flat color palette, subtle paper-grain texture, clean modern storybook style,',
+        flux_negative_prompt = 'photorealistic, 3d render, photograph',
+        name = 'Storybook Vector',
+        description = 'Flat vector storybook illustrations — bold shapes, limited palette, paper grain.'
+    WHERE id = 'default'
+      AND flux_prompt_prefix = 'detailed oil painting, fantasy book illustration, warm lighting,'
+    """,
 ]
 
 

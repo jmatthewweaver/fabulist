@@ -69,10 +69,10 @@ async def _seed_styles():
             return
         db.add(Style(
             id="default",
-            name="Classic Illustrated",
-            description="Painterly illustrations in the style of classic fantasy book covers.",
-            flux_prompt_prefix="detailed oil painting, fantasy book illustration, warm lighting,",
-            flux_negative_prompt="photorealistic, modern, sci-fi",
+            name="Storybook Vector",
+            description="Flat vector storybook illustrations — bold shapes, limited palette, paper grain.",
+            flux_prompt_prefix="flat vector illustration, simple bold shapes, limited flat color palette, subtle paper-grain texture, clean modern storybook style,",
+            flux_negative_prompt="photorealistic, 3d render, photograph",
             tone_instructions="Enrich descriptions with vivid sensory detail and a sense of wonder.",
         ))
         await db.commit()
