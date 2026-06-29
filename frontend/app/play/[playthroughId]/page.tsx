@@ -108,12 +108,6 @@ export default function PlayPage() {
     ]);
   }, [isStreaming, currentRoom]);
 
-  const requestImage = useCallback(() => {
-    if (!wsRef.current) return;
-    setImageLoading(true);
-    wsRef.current.send(JSON.stringify({ type: "request_image" }));
-  }, []);
-
   const displayedTurn = turns[currentTurn];
   const narrativeToShow = isStreaming
     ? streamingText
@@ -130,7 +124,7 @@ export default function PlayPage() {
           )}
         </span>
       </div>
-      <SceneImage url={imageUrl} loading={imageLoading} roomName={currentRoom} onRequestImage={requestImage} />
+      <SceneImage url={imageUrl} loading={imageLoading} roomName={currentRoom} />
       <NarrativePanel
         sceneDescription={sceneDescription}
         command={displayedTurn?.userInput ?? ""}

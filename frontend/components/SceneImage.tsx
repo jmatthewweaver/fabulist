@@ -1,14 +1,13 @@
 "use client";
-import { Camera, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 
 interface Props {
   url: string | null;
   loading: boolean;
   roomName: string;
-  onRequestImage: () => void;
 }
 
-export function SceneImage({ url, loading, roomName, onRequestImage }: Props) {
+export function SceneImage({ url, loading, roomName }: Props) {
   return (
     <div className="relative w-full flex-shrink-0" style={{ height: "38vh" }}>
       {/* Atmospheric placeholder */}
@@ -22,16 +21,6 @@ export function SceneImage({ url, loading, roomName, onRequestImage }: Props) {
           className="absolute inset-0 w-full h-full object-cover transition-opacity duration-700"
         />
       )}
-
-      {/* 📷 button — always available, bypasses cooldown */}
-      <button
-        onClick={onRequestImage}
-        disabled={loading}
-        className="absolute top-2 right-2 p-1.5 rounded-md bg-stone-950/60 hover:bg-stone-950/80 text-stone-400 hover:text-stone-200 transition-colors disabled:opacity-40"
-        title="Generate image of current scene"
-      >
-        <Camera size={15} />
-      </button>
 
       {/* Generating overlay — clearly indicates a new image is being produced */}
       {loading && (
