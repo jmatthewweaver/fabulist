@@ -166,9 +166,18 @@ def psql_json(sql: str):
     if not raw or raw.startswith("error:"):
         return None
     try:
-        return json.loads(raw)
+        val = json.loads(raw)
     except Exception:
         return None
+    # world_bible / vocab_index are stored as json.dumps(...) INTO a JSONB column, so they read
+    # back double-encoded (a JSON string holding more JSON). Peel string layers until we reach
+    # the real object; stop on the first layer that isn't itself JSON.
+    while isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except Exception:
+            break
+    return val
 
 
 def _safe_id(s: str) -> str:
