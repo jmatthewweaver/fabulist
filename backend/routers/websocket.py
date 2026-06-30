@@ -57,11 +57,17 @@ def _extract_new_room(raw_text: str, known_rooms: set[str] | None = None) -> str
     capital, no sentence punctuation), which has false positives like "You are carrying:"
     (the inventory header) that would otherwise be mistaken for a room.
     """
-    first_line = raw_text.strip().split("\n")[0].strip()
-    if not first_line:
+    lines = [ln.strip() for ln in raw_text.strip().split("\n") if ln.strip()]
+    if not lines:
         return None
     if known_rooms:
-        return first_line if first_line.strip().lower() in known_rooms else None
+        # A turn may chain several commands (e.g. two moves); the LAST room header in the
+        # combined output is the room the player actually ends up in.
+        for line in reversed(lines):
+            if line.lower() in known_rooms:
+                return line
+        return None
+    first_line = lines[0]
     if (len(first_line) < 60
             and first_line[0].isupper()
             and not first_line.endswith((".", "!", "?", ",", ":"))):
@@ -368,9 +374,12 @@ async def play(websocket: WebSocket, playthrough_id: str):
                 latest_save = playthrough.engine_save
 
                 async def step_fn(cmd: str):
+                    # Restore from latest_save (NOT the fixed pre-turn save) so a multi-command
+                    # input chains: each accepted command advances the state the next one sees.
+                    # A rejected command leaves latest_save untouched, so retries restart clean.
                     nonlocal latest_save
                     result, new_save = await run_one_turn(
-                        game_path, cmd, playthrough.engine_save, settings.dfrotz_path
+                        game_path, cmd, latest_save, settings.dfrotz_path
                     )
                     if not result.rejected:
                         latest_save = new_save
