@@ -27,8 +27,12 @@ stairs, opening), find that feature in the surroundings and output the DIRECTION
     → {"verb": "north", "noun": null, "prep": null, "indirect": null}
   surroundings "a window opens to the east" + "climb through the window"
     → {"verb": "east", "noun": null, "prep": null, "indirect": null}
+  surroundings names an open window/door/opening but NO direction + "climb in the window"
+    → {"verb": "enter", "noun": "window", "prep": null, "indirect": null}
 Prefer the SURROUNDINGS for resolving objects and directions; fall back to the vocabulary
-lists for spelling. Use a bare direction as the verb for movement (noun null)."""
+lists for spelling. Use a bare direction as the verb for movement (noun null).
+
+Output the single JSON object and NOTHING else — no explanation, no reasoning, no code fences."""
 
 _TRANSLATE_PROMPT = """Current room: {room}
 Surroundings (the game's own current description — use it to resolve directions and objects):
@@ -49,6 +53,36 @@ Known verbs: {verbs}
 
 Try a different command for: "{original_input}"
 Output JSON only."""
+
+
+def _parse_command(raw: str) -> dict | None:
+    """
+    Extract a parser-command dict from the model's reply, defensively.
+
+    Haiku sometimes ignores "JSON only" and emits reasoning prose around (or instead of) the
+    JSON — occasionally several JSON blocks as it "reconsiders". We must NEVER feed that prose
+    to the game as a command (it did, with persist=True, corrupting the save). So: take the
+    LAST well-formed flat JSON object (the model's conclusion); else accept ONLY a short,
+    single-line bare command (e.g. the model just wrote "north"); else give up (None).
+    """
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip() if "\n" in raw else raw[3:]
+
+    # Our schema is flat (no nested braces), so non-greedy {...} chunks are safe to scan.
+    for chunk in reversed(re.findall(r"\{[^{}]*\}", raw, re.DOTALL)):
+        try:
+            parsed = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("verb"), str) and parsed["verb"].strip():
+            return parsed
+
+    # No JSON: only trust a bare one-liner that actually looks like a command, never a blob.
+    first = raw.splitlines()[0].strip() if raw else ""
+    if first and "{" not in first and len(first) <= 40 and len(first.split()) <= 4:
+        return {"verb": first, "noun": None, "prep": None, "indirect": None}
+    return None
 
 
 def _assemble_command(parsed: dict) -> str:
@@ -127,15 +161,13 @@ async def translate(
             system=_SYSTEM,
             messages=[{"role": "user", "content": content}],
         )
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            # Fallback: treat the whole text as a raw command
-            parsed = {"verb": raw, "noun": None, "prep": None, "indirect": None}
+        parsed = _parse_command(response.content[0].text)
+        if parsed is None:
+            # The model returned prose, not a command. Don't run it through the game (that
+            # corrupts the save). Note it and retry with the stern reminder.
+            last_command = None
+            last_rejection = "the previous reply was not a single JSON command"
+            continue
 
         parsed = _resolve_nouns(parsed, vocab_index)
         command = _assemble_command(parsed)
