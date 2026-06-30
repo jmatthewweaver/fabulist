@@ -42,7 +42,11 @@ Rules:
    it. NEVER introduce a person, figure, observer, or silhouette that the game output does not
    name (e.g. don't add "a figure perches in the tree" for a room the player is simply standing
    in). Still depict characters the output explicitly mentions — a thief, a troll, a gnome.
-7. 2-3 plain sentences.
+7. Always include the visible EXITS the game's output names — a passage, doorway, archway,
+   staircase, or a window you can pass through — as concrete architectural features ("an
+   archway opens to the west, a dark staircase climbs upward"). They orient the player and
+   are part of the room; do not drop them for brevity.
+8. 2-4 plain sentences.
 Output only the description prose."""
 
 

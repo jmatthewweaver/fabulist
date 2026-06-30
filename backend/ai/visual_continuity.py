@@ -32,7 +32,8 @@ def _entity_in_scene(name: str, scene_lower: str) -> bool:
 def _format_guide(style: str, entities: dict) -> str:
     lines: list[str] = []
     if style:
-        lines.append(f"Global style (apply to every image): {style}")
+        lines.append(f"GLOBAL LOOK (the palette, light and mood every scene shares — weave it "
+                     f"into the description as colour/light/mood, never as new scenery): {style}")
     if entities:
         lines.append("If — and only if — the scene includes any of these, draw them like this:")
         lines += [f"- {name}: {desc}" for name, desc in entities.items()]
@@ -47,26 +48,36 @@ def _parse_json(raw: str) -> dict:
     return json.loads(raw[start:end + 1]) if start != -1 and end != -1 else {}
 
 
-_AUGMENT_SYSTEM = """You write a single image-generation prompt that keeps a game's locations
-visually consistent. You are given a STYLE GUIDE (the established global look, and how specific
-recurring things must appear) and a SCENE to depict.
+_AUGMENT_SYSTEM = """You write a single image-generation prompt for a game location, so the
+game's places share a consistent look. You are given a GLOBAL LOOK (the palette, lighting and
+mood every scene shares), canonical appearances for specific recurring things, and the SCENE to
+depict. The art medium/style is applied SEPARATELY by the system — don't restate it.
 
 Write ONE image prompt that:
-- BEGINS with the guide's global style verbatim — the MEDIUM (e.g. "realistic photograph"),
-  camera framing, lighting, palette and weather — so it dominates the image,
-- always frames the location as a WIDE ESTABLISHING SHOT showing the whole scene at eye level
-  (never a tight close-up or a different medium),
-- depicts ONLY what the SCENE describes. Use a guide entity's appearance only when the scene
-  itself includes that thing. NEVER add buildings, objects, or features the scene does not
-  mention (a mailbox or house must not appear in a forest or up a tree).
+- describes the SCENE's physical content (the location and the things in it) as concrete
+  subjects, framed wide enough to show the whole space,
+- WEAVES the global look into that description as natural language — the same palette, light
+  and mood settling over THIS place — rather than tacking it on as a separate clause or prefix,
+- when the scene includes one of the listed recurring things, draws it the canonical way,
+- applies the global look ONLY as colour/light/mood. NEVER let it (or anything) add buildings,
+  objects, places, or scenery the SCENE itself does not mention — no forest, house, or room the
+  scene didn't state (the global look is an atmosphere, not a place),
+- contains NO medium, art-style, camera, or photography words ("photograph", "illustration",
+  "establishing shot", "eye level", "style guide", "render", "wide shot") and NO meta or
+  instruction language — only the scene's physical content and its colour/light/mood, or the
+  image will draw those words literally.
 Phrase everything affirmatively — describe what IS present, never what is absent.
 Output only the prompt, no preamble."""
 
 
 async def augment_prompt(scene_description: str, guide: dict) -> str:
-    """Rewrite a scene description into a prompt consistent with the running guide.
-    Only entities actually present in the scene are carried in (so the mailbox/house don't
-    follow the player around). Falls back to the description unchanged with no guide."""
+    """Rewrite a scene description into a prompt that carries the running guide.
+    The guide's "style" — a transferable ATMOSPHERE (palette, light, mood), NOT a medium or a
+    place (see _ANALYZE_SYSTEM) — is woven into the scene as colour/light/mood so the game's
+    locations stay consistent scene to scene. The art medium itself is applied separately via
+    style_prefix. Only entities actually present in the scene are carried in (so the
+    mailbox/house don't follow the player around). Falls back to the description unchanged when
+    there's nothing to enforce."""
     guide = guide or {}
     style = guide.get("style") or ""
     scene_lower = scene_description.lower()
@@ -80,7 +91,7 @@ async def augment_prompt(scene_description: str, guide: dict) -> str:
             max_tokens=400,
             system=_AUGMENT_SYSTEM,
             messages=[{"role": "user",
-                       "content": f"STYLE GUIDE:\n{_format_guide(style, relevant)}\n\nSCENE:\n{scene_description}"}],
+                       "content": f"{_format_guide(style, relevant)}\n\nSCENE:\n{scene_description}"}],
         )
         return response.content[0].text.strip() or scene_description
     except Exception:
@@ -93,11 +104,14 @@ the current guide, the scene description, and the IMAGE that was generated. Upda
 from what the image actually shows.
 
 Return ONLY JSON: {"style": "...", "entities": {"<name>": "<appearance>"}}
-- "style": one paragraph that MUST begin by naming the MEDIUM explicitly (e.g. "realistic
-  photograph" vs "painterly digital illustration" vs "3D render") and the camera framing
-  (e.g. "wide establishing shot at eye level"), then palette, lighting, weather and mood.
-  This is set from the FIRST image and must stay STABLE — repeat the existing style almost
-  verbatim unless it is clearly wrong.
+- "style": one or two natural sentences capturing ONLY the transferable ATMOSPHERE every scene
+  shares — colour palette, colour temperature, lighting quality, weather/haze, and mood. Do
+  NOT name the art medium or art style (it is fixed elsewhere), do NOT mention camera, framing,
+  shot type, or "eye level", and do NOT name any specific PLACE or object ("forest", "house",
+  "kitchen") — only qualities that transfer to ANY location. This is set from the FIRST image
+  and must stay STABLE — repeat the existing style almost verbatim unless clearly wrong.
+  Example: "A muted, cool palette of slate blues and deep greens under soft, low twilight
+  light, with a faint ground haze and a quiet, melancholy mood."
 - "entities": canonical, concise appearances of NOTABLE, RECURRING things in the image
   (buildings, landscape features, characters) that may appear in other locations — NOT
   one-off small props. Only include things actually visible. Keep each to one short clause.
